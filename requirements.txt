@@ -1,9 +1,6 @@
 streamlit
 pandas
-numpy
 requests
-geopandas
+pyproj
 folium
-plotly
-streamlit-folium
 shapely
