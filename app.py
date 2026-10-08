@@ -7,46 +7,66 @@ import folium
 import plotly.express as px
 
 from streamlit_folium import st_folium
-from shapely.geometry import shape
+from shapely.geometry import shape, Point, box
+from shapely.ops import unary_union
+from folium.plugins import Fullscreen
 
 
 # ============================================================
-# LADYWOOD ENVIRONMENTAL RISK DASHBOARD
-# Birmingham, United Kingdom
+# LADYWOOD ENVIRONMENTAL RISK & CLIMATE DASHBOARD
+# Official Birmingham spatial evidence
 # ============================================================
 
 st.set_page_config(
     page_title="Ladywood Environmental Risk Dashboard",
     page_icon="🌍",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 
 # ============================================================
-# SETTINGS
+# OFFICIAL DATA SOURCES
 # ============================================================
 
-EXCEL_FILE = "Ladywood_4_Zone_Air_Risk_Final.xlsx"
-
-BIRMINGHAM_GIS = (
+ARCGIS = (
     "https://maps.birmingham.gov.uk/server/rest/services/"
     "CRVA/CRVA_2025/MapServer"
 )
 
-WARD_LAYER = f"{BIRMINGHAM_GIS}/14"
-CRVA_LAYER = f"{BIRMINGHAM_GIS}/12"
+WARD_LAYER = f"{ARCGIS}/14"
 
-PM25_LAYER = f"{BIRMINGHAM_GIS}/9"
-NO2_LAYER = f"{BIRMINGHAM_GIS}/8"
+CRVA_WARD_LAYER = f"{ARCGIS}/12"
 
-FLUVIAL_LAYER = f"{BIRMINGHAM_GIS}/1547"
-PLUVIAL_LAYER = f"{BIRMINGHAM_GIS}/1546"
+NO2_LAYER = f"{ARCGIS}/8"
 
-GREENSPACE_LAYER = f"{BIRMINGHAM_GIS}/1549"
-WOODLAND_LAYER = f"{BIRMINGHAM_GIS}/1552"
+PM25_LAYER = f"{ARCGIS}/9"
 
-WHO_NO2 = 10.0
-WHO_PM25 = 5.0
+PLUVIAL_LAYER = f"{ARCGIS}/1546"
+
+GREENSPACE_LAYER = f"{ARCGIS}/1549"
+
+WOODLAND_LAYER = f"{ARCGIS}/1552"
+
+TREE_CANOPY_LAYER = f"{ARCGIS}/3"
+
+BROWNFIELD_API = (
+    "https://www.planning.data.gov.uk/"
+    "api/1.0/entity.json"
+)
+
+BIRMINGHAM_ORGANISATION = "44"
+
+
+# ============================================================
+# ADMIN SETTINGS
+# ============================================================
+
+if "admin_mode" not in st.session_state:
+    st.session_state.admin_mode = False
+
+if "refresh_data" not in st.session_state:
+    st.session_state.refresh_data = False
 
 
 # ============================================================
@@ -57,53 +77,53 @@ st.markdown(
     """
     <style>
 
-    .main-title {
-        font-size: 42px;
-        font-weight: 700;
-        margin-bottom: 0px;
+    .title {
+        font-size: 44px;
+        font-weight: 750;
         color: #17324d;
+        margin-bottom: 0;
     }
 
     .subtitle {
-        font-size: 17px;
+        font-size: 18px;
         color: #66727c;
         margin-bottom: 25px;
     }
 
-    .section-title {
-        font-size: 25px;
-        font-weight: 650;
+    .section {
+        font-size: 26px;
+        font-weight: 700;
         color: #17324d;
         margin-top: 25px;
-        margin-bottom: 10px;
+        margin-bottom: 12px;
     }
 
-    .risk-high {
-        background-color: #f8d7da;
-        padding: 12px;
-        border-radius: 8px;
-        border-left: 6px solid #c62828;
-    }
-
-    .risk-medium {
-        background-color: #fff3cd;
-        padding: 12px;
-        border-radius: 8px;
-        border-left: 6px solid #e0a800;
-    }
-
-    .risk-low {
-        background-color: #dff2e1;
-        padding: 12px;
-        border-radius: 8px;
-        border-left: 6px solid #2e7d32;
-    }
-
-    .method-box {
-        background-color: #f5f7f9;
-        padding: 18px;
+    .info-box {
+        background: #f5f7f9;
+        border: 1px solid #d9dfe5;
         border-radius: 10px;
-        border: 1px solid #dce1e5;
+        padding: 18px;
+    }
+
+    .high {
+        background: #f8d7da;
+        border-left: 6px solid #c62828;
+        padding: 14px;
+        border-radius: 8px;
+    }
+
+    .moderate {
+        background: #fff3cd;
+        border-left: 6px solid #e0a800;
+        padding: 14px;
+        border-radius: 8px;
+    }
+
+    .low {
+        background: #dff2e1;
+        border-left: 6px solid #2e7d32;
+        padding: 14px;
+        border-radius: 8px;
     }
 
     </style>
@@ -113,11 +133,11 @@ st.markdown(
 
 
 # ============================================================
-# FUNCTIONS
+# GENERAL ARC GIS FUNCTION
 # ============================================================
 
 @st.cache_data(ttl=3600)
-def get_arcgis_layer(url, where="1=1"):
+def get_feature_layer(url, where="1=1"):
 
     params = {
         "where": where,
@@ -130,29 +150,35 @@ def get_arcgis_layer(url, where="1=1"):
     response = requests.get(
         f"{url}/query",
         params=params,
-        timeout=60
+        timeout=90
     )
 
     response.raise_for_status()
 
     data = response.json()
 
-    if "features" not in data:
-        return gpd.GeoDataFrame()
+    features = data.get("features", [])
 
     records = []
 
-    for feature in data["features"]:
+    for feature in features:
 
-        properties = feature.get("properties", {})
         geometry = feature.get("geometry")
 
-        if geometry:
-            properties["geometry"] = shape(geometry)
-            records.append(properties)
+        if geometry is None:
+            continue
+
+        properties = feature.get("properties", {}).copy()
+
+        properties["geometry"] = shape(geometry)
+
+        records.append(properties)
 
     if not records:
-        return gpd.GeoDataFrame()
+        return gpd.GeoDataFrame(
+            geometry=[],
+            crs="EPSG:4326"
+        )
 
     return gpd.GeoDataFrame(
         records,
@@ -161,124 +187,223 @@ def get_arcgis_layer(url, where="1=1"):
     )
 
 
-@st.cache_data(ttl=3600)
-def get_brownfield_data():
+# ============================================================
+# LADYWOOD BOUNDARY
+# ============================================================
 
-    url = (
-        "https://www.planning.data.gov.uk/"
-        "api/1.0/entity.json"
+@st.cache_data(ttl=3600)
+def get_ladywood():
+
+    wards = get_feature_layer(
+        WARD_LAYER,
+        "WARDNME LIKE '%Ladywood%'"
     )
 
-    params = {
-        "dataset": "brownfield-land",
-        "organisation-entity": "44",
-        "limit": 1000
-    }
-
-    try:
-
-        r = requests.get(
-            url,
-            params=params,
-            timeout=60
+    if wards.empty:
+        raise ValueError(
+            "The official Birmingham Ladywood ward boundary "
+            "could not be retrieved."
         )
 
-        if r.status_code != 200:
-            return pd.DataFrame()
-
-        data = r.json()
-
-        if isinstance(data, dict):
-            records = data.get("entities", data.get("results", []))
-        else:
-            records = data
-
-        if not records:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(records)
-
-        return df
-
-    except Exception:
-
-        return pd.DataFrame()
-
-
-@st.cache_data
-def load_air_data():
-
-    monthly = pd.read_excel(
-        EXCEL_FILE,
-        sheet_name="Original_Monthly_Data"
-    )
-
-    zone = pd.read_excel(
-        EXCEL_FILE,
-        sheet_name="Zone_Year_Calcs"
-    )
-
-    summary = pd.read_excel(
-        EXCEL_FILE,
-        sheet_name="Zone_Risk_Summary"
-    )
-
-    return monthly, zone, summary
-
-
-def classify_air(no2, pm25):
-
-    if pd.isna(no2) or pd.isna(pm25):
-        return "UNKNOWN"
-
-    no2_percent = no2 / WHO_NO2 * 100
-    pm_percent = pm25 / WHO_PM25 * 100
-
-    if no2_percent <= 100 and pm_percent <= 100:
-        return "LOW"
-
-    if no2_percent <= 150 and pm_percent <= 150:
-        return "MODERATE"
-
-    return "HIGH"
-
-
-def risk_score(no2, pm25):
-
-    no2_percent = no2 / WHO_NO2 * 100
-    pm_percent = pm25 / WHO_PM25 * 100
-
-    return (no2_percent + pm_percent) / 2
-
-
-def risk_colour(risk):
-
-    if risk == "HIGH":
-        return "#c62828"
-
-    if risk == "MODERATE":
-        return "#f0b429"
-
-    return "#2e7d32"
+    return wards
 
 
 # ============================================================
-# LOAD DATA
+# BROWNFIELDS
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_brownfields():
+
+    params = {
+        "dataset": "brownfield-land",
+        "organisation-entity": BIRMINGHAM_ORGANISATION,
+        "limit": 5000
+    }
+
+    response = requests.get(
+        BROWNFIELD_API,
+        params=params,
+        timeout=90
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if isinstance(data, dict):
+
+        records = data.get(
+            "entities",
+            data.get("results", [])
+        )
+
+    else:
+
+        records = data
+
+    rows = []
+
+    for item in records:
+
+        point_text = item.get("point")
+
+        if not point_text:
+            continue
+
+        try:
+
+            coords = point_text.replace(
+                "POINT (",
+                ""
+            ).replace(
+                ")",
+                ""
+            ).split()
+
+            lon = float(coords[0])
+            lat = float(coords[1])
+
+        except Exception:
+            continue
+
+        rows.append(
+            {
+                "Reference":
+                    item.get("reference"),
+
+                "Site":
+                    item.get("site-address"),
+
+                "Hectares":
+                    pd.to_numeric(
+                        item.get("hectares"),
+                        errors="coerce"
+                    ),
+
+                "Latitude":
+                    lat,
+
+                "Longitude":
+                    lon,
+
+                "Status":
+                    item.get(
+                        "planning-permission-status"
+                    ),
+
+                "Entry date":
+                    item.get("entry-date")
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# FILTER DATA TO LADYWOOD
+# ============================================================
+
+def filter_points_to_ladywood(
+    df,
+    ladywood
+):
+
+    if df.empty:
+        return df
+
+    polygon = unary_union(
+        ladywood.geometry
+    )
+
+    points = [
+        Point(
+            row["Longitude"],
+            row["Latitude"]
+        )
+        for _, row in df.iterrows()
+    ]
+
+    mask = [
+        polygon.contains(point)
+        for point in points
+    ]
+
+    return df.loc[mask].copy()
+
+
+# ============================================================
+# FLOOD DATA
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_flood_data():
+
+    return get_feature_layer(
+        PLUVIAL_LAYER,
+        "1=1"
+    )
+
+
+# ============================================================
+# GREENSPACE
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_greenspace():
+
+    return get_feature_layer(
+        GREENSPACE_LAYER,
+        "1=1"
+    )
+
+
+# ============================================================
+# WOODLAND
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_woodland():
+
+    return get_feature_layer(
+        WOODLAND_LAYER,
+        "1=1"
+    )
+
+
+# ============================================================
+# CRVA
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_crva():
+
+    return get_feature_layer(
+        CRVA_WARD_LAYER,
+        "1=1"
+    )
+
+
+# ============================================================
+# SAFE DATA LOADING
 # ============================================================
 
 try:
 
-    monthly, zone, summary = load_air_data()
+    ladywood = get_ladywood()
 
 except Exception as error:
 
     st.error(
-        "The Excel file could not be loaded. "
-        "Make sure Ladywood_4_Zone_Air_Risk_Final.xlsx "
-        "is in the same folder as app.py."
+        f"Unable to load the official Ladywood boundary: {error}"
     )
 
     st.stop()
+
+
+ladywood_polygon = unary_union(
+    ladywood.geometry
+)
 
 
 # ============================================================
@@ -286,14 +411,14 @@ except Exception as error:
 # ============================================================
 
 st.markdown(
-    '<div class="main-title">LADYWOOD</div>',
+    '<div class="title">LADYWOOD</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
     '<div class="subtitle">'
-    'Environmental Risk & Development Dashboard '
-    '— Birmingham, United Kingdom'
+    'Environmental Risk & Climate Dashboard'
+    ' — Birmingham, United Kingdom'
     '</div>',
     unsafe_allow_html=True
 )
@@ -303,66 +428,136 @@ st.markdown(
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title("Dashboard controls")
-
-years = sorted(
-    monthly["Year"].dropna().unique().astype(int)
+st.sidebar.title(
+    "Dashboard controls"
 )
 
-selected_year = st.sidebar.selectbox(
-    "Year",
-    years,
-    index=len(years) - 1
-)
 
-zones = [
-    "All zones",
-    "City Centre",
-    "Jewellery Quarter & Broad Street",
-    "Park Central",
-    "Remainder of Ladywood"
-]
+# ------------------------------------------------------------
+# ADMIN LOGIN
+# ------------------------------------------------------------
 
-selected_zone = st.sidebar.selectbox(
-    "Development area",
-    zones
-)
+with st.sidebar.expander(
+    "Administrator"
+):
 
-show_flooding = st.sidebar.checkbox(
-    "Show flood-risk layer",
-    True
+    password = st.text_input(
+        "Admin password",
+        type="password"
+    )
+
+    if password:
+
+        expected_password = st.secrets.get(
+            "ADMIN_PASSWORD",
+            "ladywood-admin"
+        )
+
+        if password == expected_password:
+
+            st.session_state.admin_mode = True
+
+        else:
+
+            st.session_state.admin_mode = False
+
+            st.error(
+                "Incorrect password."
+            )
+
+
+# ============================================================
+# PUBLIC CONTROLS
+# ============================================================
+
+st.sidebar.markdown(
+    "### Map layers"
 )
 
 show_air = st.sidebar.checkbox(
-    "Show air-risk points",
+    "Air pollution",
     True
 )
 
-show_brownfield = st.sidebar.checkbox(
-    "Show brownfield sites",
+show_flooding = st.sidebar.checkbox(
+    "Surface-water flooding",
+    True
+)
+
+show_brownfields = st.sidebar.checkbox(
+    "Brownfield land",
+    True
+)
+
+show_greenspace = st.sidebar.checkbox(
+    "Greenspace",
+    True
+)
+
+show_woodland = st.sidebar.checkbox(
+    "Woodland",
     True
 )
 
 
 # ============================================================
-# REAL LADYWOOD BOUNDARY
+# ADMIN CONTROLS
 # ============================================================
 
-with st.spinner("Loading the official Ladywood boundary..."):
+if st.session_state.admin_mode:
 
-    ladywood = get_arcgis_layer(
-        WARD_LAYER,
-        "WARDNME LIKE '%Ladywood%'"
+    st.sidebar.success(
+        "Administrator mode active"
     )
 
-
-if ladywood.empty:
-
-    st.error(
-        "The Birmingham GIS service did not return the Ladywood boundary."
+    st.sidebar.markdown(
+        "### Analysis settings"
     )
 
-    st.stop()
+    air_weight = st.sidebar.slider(
+        "Air pollution weighting",
+        0.0,
+        1.0,
+        0.35,
+        0.05
+    )
+
+    flood_weight = st.sidebar.slider(
+        "Flooding weighting",
+        0.0,
+        1.0,
+        0.30,
+        0.05
+    )
+
+    land_weight = st.sidebar.slider(
+        "Land-condition weighting",
+        0.0,
+        1.0,
+        0.20,
+        0.05
+    )
+
+    green_weight = st.sidebar.slider(
+        "Green-infrastructure weighting",
+        0.0,
+        1.0,
+        0.15,
+        0.05
+    )
+
+    st.sidebar.caption(
+        "These settings affect the engineering screening "
+        "index only. They do not alter official source data."
+    )
+
+    if st.sidebar.button(
+        "Refresh official data"
+    ):
+
+        st.cache_data.clear()
+
+        st.rerun()
 
 
 # ============================================================
@@ -370,14 +565,19 @@ if ladywood.empty:
 # ============================================================
 
 st.markdown(
-    '<div class="section-title">Ladywood environmental map</div>',
+    '<div class="section">Ladywood environmental map</div>',
     unsafe_allow_html=True
 )
 
+
+# Find map centre
+centroid = ladywood.geometry.union_all().centroid
+
 map_center = [
-    ladywood.geometry.centroid.y.mean(),
-    ladywood.geometry.centroid.x.mean()
+    centroid.y,
+    centroid.x
 ]
+
 
 m = folium.Map(
     location=map_center,
@@ -386,15 +586,21 @@ m = folium.Map(
 )
 
 
-# Actual Ladywood boundary
+Fullscreen().add_to(m)
+
+
+# ------------------------------------------------------------
+# LADYWOOD BOUNDARY
+# ------------------------------------------------------------
+
 folium.GeoJson(
     ladywood.to_json(),
-    name="Official Ladywood Ward",
+    name="Official Ladywood Ward Boundary",
     style_function=lambda feature: {
-        "fillColor": "#dfeaf2",
+        "fillColor": "#ffffff",
         "color": "#17324d",
         "weight": 4,
-        "fillOpacity": 0.18
+        "fillOpacity": 0.05
     },
     tooltip=folium.GeoJsonTooltip(
         fields=["WARDNME"],
@@ -404,304 +610,251 @@ folium.GeoJson(
 
 
 # ============================================================
-# CRVA DATA
+# FLOODING
 # ============================================================
+
+flood_count = 0
 
 try:
 
-    crva = get_arcgis_layer(
-        CRVA_LAYER,
-        "WARDNME LIKE '%Ladywood%'"
-    )
+    flood = get_flood_data()
 
-except Exception:
+    if not flood.empty:
 
-    crva = gpd.GeoDataFrame()
-
-
-if not crva.empty:
-
-    for _, row in crva.iterrows():
-
-        mean_score = row.get("MEAN")
-
-        if pd.isna(mean_score):
-            continue
-
-        if mean_score >= 6.9:
-            colour = "#c62828"
-
-        elif mean_score >= 5.0:
-            colour = "#f0b429"
-
-        else:
-            colour = "#2e7d32"
-
-        folium.GeoJson(
-            gpd.GeoSeries(
-                [row.geometry],
-                crs="EPSG:4326"
-            ).to_json(),
-            style_function=lambda feature,
-            colour=colour: {
-                "fillColor": colour,
-                "color": "#555555",
-                "weight": 1,
-                "fillOpacity": 0.15
-            }
-        ).add_to(m)
-
-
-# ============================================================
-# AIR-RISK POINTS
-# ============================================================
-
-zone_2026 = zone[
-    zone["Year"] == selected_year
-].copy()
-
-
-# These are representative screening locations,
-# NOT claimed official sub-zone boundaries.
-zone_locations = {
-
-    "City Centre":
-        (52.4805, -1.9018),
-
-    "Jewellery Quarter & Broad Street":
-        (52.4815, -1.9130),
-
-    "Park Central":
-        (52.4732, -1.9190),
-
-    "Remainder of Ladywood":
-        (52.4770, -1.9220)
-}
-
-
-if show_air:
-
-    for _, row in zone_2026.iterrows():
-
-        zone_name = row["Zone"]
-
-        if zone_name not in zone_locations:
-            continue
-
-        if selected_zone != "All zones":
-            if zone_name != selected_zone:
-                continue
-
-        lat, lon = zone_locations[zone_name]
-
-        risk = row["Air_Risk_Class"]
-
-        colour = risk_colour(risk)
-
-        popup = f"""
-        <b>{zone_name}</b><br>
-        Air risk: <b>{risk}</b><br>
-        NO₂: {row['NO2_Calculated']:.2f} µg/m³<br>
-        PM2.5: {row['PM2_5_Calculated']:.2f} µg/m³<br>
-        Risk score: {row['Air_Risk_Score']:.2f}
-        """
-
-        folium.CircleMarker(
-            location=[lat, lon],
-            radius=12,
-            color="white",
-            weight=2,
-            fill=True,
-            fill_color=colour,
-            fill_opacity=0.95,
-            popup=folium.Popup(
-                popup,
-                max_width=300
-            )
-        ).add_to(m)
-
-
-# ============================================================
-# BROWNFIELDS
-# ============================================================
-
-if show_brownfield:
-
-    brownfields = [
-
-        {
-            "name":
-                "IPL Site, Ladywood",
-            "lat":
-                52.480986,
-            "lon":
-                -1.931924,
-            "ha":
-                0.55
-        },
-
-        {
-            "name":
-                "IPL Site, Ladywood",
-            "lat":
-                52.481159,
-            "lon":
-                -1.930243,
-            "ha":
-                1.25
-        },
-
-        {
-            "name":
-                "Ledsam Street, Ladywood",
-            "lat":
-                52.480270,
-            "lon":
-                -1.924084,
-            "ha":
-                3.93
-        },
-
-        {
-            "name":
-                "Chamberlain Buildings, Corporation Street",
-            "lat":
-                52.484217,
-            "lon":
-                -1.892989,
-            "ha":
-                0.19
-        },
-
-        {
-            "name":
-                "Brindley Drive Multi-Storey Car Park",
-            "lat":
-                52.480642,
-            "lon":
-                -1.907971,
-            "ha":
-                0.33
-        },
-
-        {
-            "name":
-                "IPL Site, Ladywood",
-            "lat":
-                52.479030,
-            "lon":
-                -1.932896,
-            "ha":
-                3.62
-        }
-    ]
-
-    for site in brownfields:
-
-        if selected_zone != "All zones":
-            # Brownfield points are shown as environmental evidence;
-            # they are not forced into a zone where the boundary is unavailable.
-            pass
-
-        popup = f"""
-        <b>Brownfield site</b><br>
-        {site['name']}<br>
-        Area: {site['ha']} ha
-        """
-
-        folium.CircleMarker(
-            location=[
-                site["lat"],
-                site["lon"]
-            ],
-            radius=6,
-            color="#1565c0",
-            fill=True,
-            fill_color="#1565c0",
-            fill_opacity=0.85,
-            popup=folium.Popup(
-                popup,
-                max_width=280
-            )
-        ).add_to(m)
-
-
-# ============================================================
-# FLOOD RISK
-# ============================================================
-
-if show_flooding:
-
-    try:
-
-        flood = get_arcgis_layer(
-            PLUVIAL_LAYER,
-            "1=1"
+        flood = gpd.clip(
+            flood,
+            ladywood
         )
 
-        if not flood.empty:
+        flood_count = len(flood)
 
-            flood = gpd.clip(
-                flood,
-                ladywood
-            )
+        if show_flooding:
 
             folium.GeoJson(
                 flood.to_json(),
                 name="Surface-water flood risk",
                 style_function=lambda feature: {
                     "fillColor": "#4f81bd",
-                    "color": "#2c5d91",
+                    "color": "#24527a",
                     "weight": 1,
-                    "fillOpacity": 0.30
+                    "fillOpacity": 0.35
                 },
-                tooltip="Surface-water flood-risk area"
+                tooltip="Official Birmingham surface-water flood-risk area"
             ).add_to(m)
 
-    except Exception:
-        pass
+except Exception as error:
+
+    if st.session_state.admin_mode:
+
+        st.warning(
+            f"Flood layer unavailable: {error}"
+        )
 
 
 # ============================================================
-# LEGEND
+# GREENSPACE
 # ============================================================
 
-legend_html = """
+greenspace_count = 0
+
+try:
+
+    greenspace = get_greenspace()
+
+    greenspace = gpd.clip(
+        greenspace,
+        ladywood
+    )
+
+    greenspace_count = len(
+        greenspace
+    )
+
+    if show_greenspace and not greenspace.empty:
+
+        folium.GeoJson(
+            greenspace.to_json(),
+            name="Official greenspace",
+            style_function=lambda feature: {
+                "fillColor": "#63a85c",
+                "color": "#3d7038",
+                "weight": 1,
+                "fillOpacity": 0.25
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["type"],
+                aliases=["Greenspace type:"]
+            )
+        ).add_to(m)
+
+except Exception as error:
+
+    if st.session_state.admin_mode:
+
+        st.warning(
+            f"Greenspace layer unavailable: {error}"
+        )
+
+
+# ============================================================
+# WOODLAND
+# ============================================================
+
+woodland_count = 0
+
+try:
+
+    woodland = get_woodland()
+
+    woodland = gpd.clip(
+        woodland,
+        ladywood
+    )
+
+    woodland_count = len(
+        woodland
+    )
+
+    if show_woodland and not woodland.empty:
+
+        folium.GeoJson(
+            woodland.to_json(),
+            name="Official woodland",
+            style_function=lambda feature: {
+                "fillColor": "#26734d",
+                "color": "#174d34",
+                "weight": 1,
+                "fillOpacity": 0.40
+            }
+        ).add_to(m)
+
+except Exception as error:
+
+    if st.session_state.admin_mode:
+
+        st.warning(
+            f"Woodland layer unavailable: {error}"
+        )
+
+
+# ============================================================
+# BROWNFIELDS
+# ============================================================
+
+brownfield_data = pd.DataFrame()
+
+try:
+
+    brownfield_data = get_brownfields()
+
+    brownfield_data = filter_points_to_ladywood(
+        brownfield_data,
+        ladywood
+    )
+
+    if show_brownfields:
+
+        for _, site in brownfield_data.iterrows():
+
+            popup = f"""
+            <b>Brownfield site</b><br><br>
+            Site: {site['Site']}<br>
+            Reference: {site['Reference']}<br>
+            Area: {site['Hectares']} ha<br>
+            Planning status: {site['Status']}
+            """
+
+            folium.CircleMarker(
+                location=[
+                    site["Latitude"],
+                    site["Longitude"]
+                ],
+                radius=6,
+                color="#7b1fa2",
+                fill=True,
+                fill_color="#7b1fa2",
+                fill_opacity=0.85,
+                popup=folium.Popup(
+                    popup,
+                    max_width=320
+                )
+            ).add_to(m)
+
+except Exception as error:
+
+    if st.session_state.admin_mode:
+
+        st.warning(
+            f"Brownfield data unavailable: {error}"
+        )
+
+
+# ============================================================
+# OFFICIAL AIR POLLUTION MAP
+# ============================================================
+
+# The Birmingham NO2 and PM2.5 layers are official raster
+# datasets. They are displayed as spatial evidence rather
+# than converted into invented point measurements.
+
+if show_air:
+
+    folium.raster_layers.WmsTileLayer(
+        url=ARCGIS.replace(
+            "/MapServer",
+            "/MapServer/export"
+        ),
+        layers="show:8",
+        fmt="image/png",
+        transparent=True,
+        name="Birmingham NO₂ spatial evidence",
+        overlay=True,
+        control=True,
+        opacity=0.65
+    ).add_to(m)
+
+
+# ============================================================
+# MAP LEGEND
+# ============================================================
+
+legend = """
 <div style="
 position: fixed;
 bottom: 30px;
 left: 30px;
 z-index: 9999;
 background: white;
-padding: 12px;
+padding: 14px;
 border: 1px solid #999;
-border-radius: 6px;
+border-radius: 7px;
 font-size: 13px;
 ">
 
-<b>Environmental indicators</b><br><br>
-
-<span style="color:#c62828">●</span>
-High air risk<br>
-
-<span style="color:#f0b429">●</span>
-Moderate air risk<br>
-
-<span style="color:#2e7d32">●</span>
-Lower air risk<br>
-
-<span style="color:#1565c0">●</span>
-Brownfield site<br>
+<b>Environmental evidence</b><br><br>
 
 <span style="color:#4f81bd">■</span>
-Surface-water flood risk
+Surface-water flood risk<br>
+
+<span style="color:#7b1fa2">●</span>
+Brownfield site<br>
+
+<span style="color:#63a85c">■</span>
+Greenspace<br>
+
+<span style="color:#26734d">■</span>
+Woodland<br>
+
+<b>Boundary:</b>
+Official Ladywood ward
 
 </div>
 """
 
 m.get_root().html.add_child(
-    folium.Element(legend_html)
+    folium.Element(legend)
 )
+
 
 folium.LayerControl().add_to(m)
 
@@ -709,524 +862,732 @@ folium.LayerControl().add_to(m)
 st_folium(
     m,
     width=None,
+    height=650,
+    returned_objects=[]
+)
+
+
+# ============================================================
+# KEY INDICATORS
+# ============================================================
+
+st.markdown(
+    '<div class="section">Ladywood environmental indicators</div>',
+    unsafe_allow_html=True
+)
+
+
+c1, c2, c3, c4 = st.columns(4)
+
+
+with c1:
+
+    st.metric(
+        "Flood-risk features",
+        flood_count
+    )
+
+
+with c2:
+
+    st.metric(
+        "Brownfield sites",
+        len(brownfield_data)
+    )
+
+
+with c3:
+
+    st.metric(
+        "Greenspace features",
+        greenspace_count
+    )
+
+
+with c4:
+
+    st.metric(
+        "Woodland features",
+        woodland_count
+    )
+
+
+# ============================================================
+# BROWNFIELD TABLE
+# ============================================================
+
+if not brownfield_data.empty:
+
+    st.markdown(
+        '<div class="section">Official brownfield evidence</div>',
+        unsafe_allow_html=True
+    )
+
+    display_brownfields = brownfield_data[
+        [
+            "Reference",
+            "Site",
+            "Hectares",
+            "Status"
+        ]
+    ].copy()
+
+    display_brownfields = (
+        display_brownfields
+        .sort_values(
+            "Hectares",
+            ascending=False
+        )
+    )
+
+    st.dataframe(
+        display_brownfields,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ============================================================
+# CLIMATE RISK
+# ============================================================
+
+st.markdown(
+    '<div class="section">Climate Risk and Vulnerability</div>',
+    unsafe_allow_html=True
+)
+
+
+try:
+
+    crva = get_crva()
+
+    ladywood_crva = crva[
+        crva.geometry.intersects(
+            ladywood_polygon
+        )
+    ].copy()
+
+    if not ladywood_crva.empty:
+
+        row = ladywood_crva.iloc[0]
+
+        values = {}
+
+        for field in [
+            "MEAN",
+            "MEDIAN",
+            "MIN",
+            "MAX"
+        ]:
+
+            if field in row.index:
+
+                values[field] = row[field]
+
+        st.dataframe(
+            pd.DataFrame(
+                [values]
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.info(
+            "The CRVA value is ward-level evidence. "
+            "It is not artificially redistributed between "
+            "smaller Ladywood areas."
+        )
+
+except Exception as error:
+
+    if st.session_state.admin_mode:
+
+        st.warning(
+            f"CRVA data unavailable: {error}"
+        )
+
+
+# ============================================================
+# ENVIRONMENTAL EVIDENCE SUMMARY
+# ============================================================
+
+st.markdown(
+    '<div class="section">Environmental evidence summary</div>',
+    unsafe_allow_html=True
+)
+
+
+summary = pd.DataFrame(
+    {
+        "Indicator": [
+            "Air pollution",
+            "Surface-water flooding",
+            "Brownfield land",
+            "Greenspace",
+            "Woodland/tree environment",
+            "Climate vulnerability"
+        ],
+
+        "Official evidence": [
+            "Birmingham CRVA NO₂ and PM2.5 spatial layers",
+            "Birmingham CRVA surface-water flood layer",
+            "UK Government Planning Data / Birmingham City Council",
+            "Birmingham CRVA greenspace layer",
+            "Birmingham CRVA woodland and vegetation data",
+            "Birmingham CRVA"
+        ],
+
+        "Use in dashboard": [
+            "Spatial pollution screening",
+            "Flood exposure",
+            "Land-condition evidence",
+            "Green infrastructure context",
+            "Tree/vegetation context",
+            "Climate-risk context"
+        ]
+    }
+)
+
+
+st.dataframe(
+    summary,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# RISK SCREENING
+# ============================================================
+
+st.markdown(
+    '<div class="section">Ladywood screening assessment</div>',
+    unsafe_allow_html=True
+)
+
+
+st.write(
+    """
+    The dashboard does not claim that Birmingham City Council
+    has officially divided Ladywood into environmental risk zones.
+
+    Instead, screening areas are derived from the spatial
+    distribution of official environmental evidence inside the
+    Ladywood ward.
+
+    This distinction is important: the result is an engineering
+    screening tool, not an official Birmingham Council risk map.
+    """
+)
+
+
+# ============================================================
+# SIMPLE SPATIAL SCREENING GRID
+# ============================================================
+
+minx, miny, maxx, maxy = ladywood_polygon.bounds
+
+grid_size = 0.002
+
+
+cells = []
+
+x_values = np.arange(
+    minx,
+    maxx,
+    grid_size
+)
+
+y_values = np.arange(
+    miny,
+    maxy,
+    grid_size
+)
+
+
+for x in x_values:
+
+    for y in y_values:
+
+        cell = box(
+            x,
+            y,
+            x + grid_size,
+            y + grid_size
+        )
+
+        if cell.intersects(
+            ladywood_polygon
+        ):
+
+            cells.append(
+                cell.intersection(
+                    ladywood_polygon
+                )
+            )
+
+
+grid = gpd.GeoDataFrame(
+    {
+        "Zone_ID": [
+            f"LW-{i + 1:02d}"
+            for i in range(len(cells))
+        ]
+    },
+    geometry=cells,
+    crs="EPSG:4326"
+)
+
+
+# ============================================================
+# FLOOD EXPOSURE SCORE
+# ============================================================
+
+if not flood.empty:
+
+    flood_union = unary_union(
+        flood.geometry
+    )
+
+    grid["Flood_Area"] = grid.geometry.apply(
+        lambda g:
+        g.intersection(
+            flood_union
+        ).area
+        if not g.is_empty
+        else 0
+    )
+
+else:
+
+    grid["Flood_Area"] = 0
+
+
+# ============================================================
+# BROWNFIELD PROXIMITY
+# ============================================================
+
+if not brownfield_data.empty:
+
+    brownfield_points = [
+        Point(
+            row["Longitude"],
+            row["Latitude"]
+        )
+        for _, row
+        in brownfield_data.iterrows()
+    ]
+
+    grid["Brownfield_Count"] = grid.geometry.apply(
+        lambda g:
+        sum(
+            g.contains(point)
+            for point in brownfield_points
+        )
+    )
+
+else:
+
+    grid["Brownfield_Count"] = 0
+
+
+# ============================================================
+# GREENSPACE COVERAGE
+# ============================================================
+
+if not greenspace.empty:
+
+    greenspace_union = unary_union(
+        greenspace.geometry
+    )
+
+    grid["Greenspace_Area"] = grid.geometry.apply(
+        lambda g:
+        g.intersection(
+            greenspace_union
+        ).area
+        if not g.is_empty
+        else 0
+    )
+
+else:
+
+    grid["Greenspace_Area"] = 0
+
+
+# ============================================================
+# NORMALISATION
+# ============================================================
+
+def normalise(series):
+
+    maximum = series.max()
+
+    minimum = series.min()
+
+    if maximum == minimum:
+
+        return pd.Series(
+            np.zeros(len(series)),
+            index=series.index
+        )
+
+    return (
+        (series - minimum)
+        /
+        (maximum - minimum)
+    )
+
+
+grid["Flood_Index"] = normalise(
+    grid["Flood_Area"]
+)
+
+grid["Brownfield_Index"] = normalise(
+    grid["Brownfield_Count"]
+)
+
+grid["Green_Deficit_Index"] = (
+    1 -
+    normalise(
+        grid["Greenspace_Area"]
+    )
+)
+
+
+# ============================================================
+# SCREENING SCORE
+# ============================================================
+
+# Air is not assigned a fake numerical value here.
+# The official NO2/PM2.5 raster remains a spatial evidence
+# layer. Flooding and land-condition calculations are derived
+# directly from official vector data.
+
+grid["Screening_Index"] = (
+
+    grid["Flood_Index"] *
+    flood_weight
+
+    +
+
+    grid["Brownfield_Index"] *
+    land_weight
+
+    +
+
+    grid["Green_Deficit_Index"] *
+    green_weight
+
+)
+
+
+# If public mode is used, weights are fixed.
+# Admin mode allows controlled experimentation.
+
+if not st.session_state.admin_mode:
+
+    total = (
+        0.30 +
+        0.20 +
+        0.15
+    )
+
+else:
+
+    total = (
+        flood_weight +
+        land_weight +
+        green_weight
+    )
+
+
+if total > 0:
+
+    grid["Screening_Index"] = (
+        grid["Screening_Index"] /
+        total
+    )
+
+
+# ============================================================
+# RISK CLASSIFICATION
+# ============================================================
+
+def classify(value):
+
+    if value >= 0.67:
+
+        return "HIGH"
+
+    if value >= 0.34:
+
+        return "MODERATE"
+
+    return "LOW"
+
+
+grid["Risk_Class"] = (
+    grid["Screening_Index"]
+    .apply(classify)
+)
+
+
+# ============================================================
+# SCREENING MAP
+# ============================================================
+
+st.markdown(
+    '<div class="section">Environmental screening zones</div>',
+    unsafe_allow_html=True
+)
+
+
+def grid_colour(feature):
+
+    risk = feature[
+        "properties"
+    ]["Risk_Class"]
+
+    if risk == "HIGH":
+
+        return "#c62828"
+
+    if risk == "MODERATE":
+
+        return "#f0a500"
+
+    return "#2e7d32"
+
+
+screen_map = folium.Map(
+    location=map_center,
+    zoom_start=13,
+    tiles="CartoDB positron"
+)
+
+
+folium.GeoJson(
+    grid.to_json(),
+    name="Ladywood screening zones",
+    style_function=lambda feature: {
+        "fillColor":
+            grid_colour(feature),
+        "color":
+            "#555555",
+        "weight":
+            1,
+        "fillOpacity":
+            0.35
+    },
+    tooltip=folium.GeoJsonTooltip(
+        fields=[
+            "Zone_ID",
+            "Risk_Class",
+            "Screening_Index"
+        ],
+        aliases=[
+            "Screening zone:",
+            "Risk:",
+            "Index:"
+        ]
+    )
+).add_to(screen_map)
+
+
+folium.GeoJson(
+    ladywood.to_json(),
+    name="Ladywood boundary",
+    style_function=lambda feature: {
+        "fillColor": "transparent",
+        "color": "#17324d",
+        "weight": 4,
+        "fillOpacity": 0
+    }
+).add_to(screen_map)
+
+
+folium.LayerControl().add_to(
+    screen_map
+)
+
+
+st_folium(
+    screen_map,
+    width=None,
     height=600,
     returned_objects=[]
 )
 
 
 # ============================================================
-# AIR QUALITY SUMMARY
+# RISK CHART
 # ============================================================
 
-st.markdown(
-    '<div class="section-title">Air-quality evidence</div>',
-    unsafe_allow_html=True
-)
-
-
-year_data = monthly[
-    monthly["Year"] <= selected_year
-].copy()
-
-
-latest = monthly[
-    monthly["Year"] == selected_year
-].copy()
-
-
-# ------------------------------------------------------------
-# KPI VALUES
-# ------------------------------------------------------------
-
-annual_zone = zone[
-    zone["Year"] == selected_year
-].copy()
-
-
-if selected_zone != "All zones":
-
-    annual_zone = annual_zone[
-        annual_zone["Zone"] == selected_zone
-    ]
-
-
-if not annual_zone.empty:
-
-    highest = annual_zone.loc[
-        annual_zone["Air_Risk_Score"].idxmax()
-    ]
-
-else:
-
-    highest = zone[
-        zone["Year"] == selected_year
-    ].loc[
-        zone[
-            zone["Year"] == selected_year
-        ]["Air_Risk_Score"].idxmax()
-    ]
-
-
-col1, col2, col3, col4 = st.columns(4)
-
-
-with col1:
-
-    st.metric(
-        "Highest priority zone",
-        highest["Zone"]
+risk_counts = (
+    grid["Risk_Class"]
+    .value_counts()
+    .reindex(
+        [
+            "HIGH",
+            "MODERATE",
+            "LOW"
+        ],
+        fill_value=0
     )
-
-
-with col2:
-
-    st.metric(
-        "Risk classification",
-        highest["Air_Risk_Class"]
-    )
-
-
-with col3:
-
-    st.metric(
-        "NO₂",
-        f"{highest['NO2_Calculated']:.2f} µg/m³"
-    )
-
-
-with col4:
-
-    st.metric(
-        "PM2.5",
-        f"{highest['PM2_5_Calculated']:.2f} µg/m³"
-    )
-
-
-# ============================================================
-# TREND DATA
-# ============================================================
-
-st.markdown(
-    "### Monthly pollution trend"
+    .reset_index()
 )
 
-
-trend = monthly[
-    monthly["Year"] <= selected_year
-].copy()
-
-
-trend["Date"] = pd.to_datetime(
-    trend["Year_Month"].astype(str)
-)
-
-
-fig_no2 = px.line(
-    trend,
-    x="Date",
-    y="NO2_Average",
-    markers=True,
-    title="Ladywood background-station NO₂"
-)
-
-fig_no2.add_hline(
-    y=WHO_NO2,
-    line_dash="dash",
-    annotation_text="WHO annual guideline: 10 µg/m³"
-)
-
-fig_no2.update_layout(
-    xaxis_title="Month",
-    yaxis_title="NO₂ (µg/m³)"
-)
-
-st.plotly_chart(
-    fig_no2,
-    use_container_width=True
-)
-
-
-fig_pm = px.line(
-    trend,
-    x="Date",
-    y="PM2_5_Average",
-    markers=True,
-    title="Ladywood background-station PM2.5"
-)
-
-fig_pm.add_hline(
-    y=WHO_PM25,
-    line_dash="dash",
-    annotation_text="WHO annual guideline: 5 µg/m³"
-)
-
-fig_pm.update_layout(
-    xaxis_title="Month",
-    yaxis_title="PM2.5 (µg/m³)"
-)
-
-st.plotly_chart(
-    fig_pm,
-    use_container_width=True
-)
-
-
-# ============================================================
-# ZONE COMPARISON
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">Development-zone comparison</div>',
-    unsafe_allow_html=True
-)
-
-
-comparison = zone[
-    zone["Year"] == selected_year
-].copy()
-
-
-comparison_display = comparison[
-    [
-        "Zone",
-        "Air_Multiplier",
-        "NO2_Calculated",
-        "PM2_5_Calculated",
-        "NO2_WHO_Percent",
-        "PM2_5_WHO_Percent",
-        "Air_Risk_Score",
-        "Air_Risk_Class"
-    ]
-].copy()
-
-
-comparison_display.columns = [
-    "Zone",
-    "Screening multiplier",
-    "NO₂",
-    "PM2.5",
-    "NO₂ / WHO",
-    "PM2.5 / WHO",
-    "Risk score",
-    "Risk"
+risk_counts.columns = [
+    "Risk",
+    "Number of screening cells"
 ]
 
 
-st.dataframe(
-    comparison_display,
-    use_container_width=True,
-    hide_index=True
-)
-
-
-# ============================================================
-# RISK SCORE CHART
-# ============================================================
-
-fig_risk = px.bar(
-    comparison,
-    x="Zone",
-    y="Air_Risk_Score",
-    color="Air_Risk_Class",
-    title=f"Air-quality screening score by development area — {selected_year}"
-)
-
-fig_risk.update_layout(
-    xaxis_title="Development area",
-    yaxis_title="Screening risk score"
+fig = px.bar(
+    risk_counts,
+    x="Risk",
+    y="Number of screening cells",
+    title="Ladywood environmental screening classification"
 )
 
 st.plotly_chart(
-    fig_risk,
+    fig,
     use_container_width=True
 )
 
 
 # ============================================================
-# FLOODING AND CLIMATE
+# HIGHEST SCREENING AREAS
 # ============================================================
 
-st.markdown(
-    '<div class="section-title">Flooding and climate evidence</div>',
-    unsafe_allow_html=True
-)
-
-c1, c2 = st.columns(2)
-
-
-with c1:
-
-    st.markdown(
-        """
-        <div class="method-box">
-
-        <h3>Flooding</h3>
-
-        Birmingham's Strategic Flood Risk Assessment identifies
-        Ladywood as an area susceptible to surface-water flooding.
-
-        The dashboard therefore treats surface-water flood exposure
-        as a separate environmental risk layer rather than inventing
-        flood measurements.
-
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-with c2:
-
-    st.markdown(
-        """
-        <div class="method-box">
-
-        <h3>Climate vulnerability</h3>
-
-        Birmingham's Climate Risk and Vulnerability Assessment
-        provides spatial information covering climate vulnerability,
-        air pollution, flooding, greenspace, woodland and temperature.
-
-        The dashboard uses these layers as spatial environmental
-        evidence.
-
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-# ============================================================
-# BROWNFIELD SECTION
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">Brownfield and land-condition evidence</div>',
-    unsafe_allow_html=True
-)
-
-brownfield_table = pd.DataFrame(
-    [
+top_zones = (
+    grid[
         [
-            "IPL Site, Ladywood",
-            "N717H",
-            0.55
-        ],
-        [
-            "IPL Site, Ladywood",
-            "N717D",
-            1.25
-        ],
-        [
-            "IPL Site, Ladywood",
-            "N718",
-            3.62
-        ],
-        [
-            "Ledsam Street, Ladywood",
-            "CC1",
-            3.93
-        ],
-        [
-            "Chamberlain Buildings, Corporation Street",
-            "CC447",
-            0.19
-        ],
-        [
-            "Brindley Drive Multi-Storey Car Park",
-            "CC445",
-            0.33
+            "Zone_ID",
+            "Flood_Index",
+            "Brownfield_Index",
+            "Green_Deficit_Index",
+            "Screening_Index",
+            "Risk_Class"
         ]
-    ],
-    columns=[
-        "Site",
-        "Reference",
-        "Area (ha)"
     ]
+    .sort_values(
+        "Screening_Index",
+        ascending=False
+    )
+    .head(10)
 )
 
-st.dataframe(
-    brownfield_table,
-    use_container_width=True,
-    hide_index=True
-)
-
-
-# ============================================================
-# OVERALL ENVIRONMENTAL PRIORITY
-# ============================================================
 
 st.markdown(
-    '<div class="section-title">Environmental priority assessment</div>',
+    '<div class="section">Highest screening areas</div>',
     unsafe_allow_html=True
 )
 
 
-st.write(
-    "The final priority should not be presented as a measured "
-    "pollution concentration. It is an engineering screening "
-    "assessment combining available environmental evidence."
-)
-
-
-# Air score normalisation
-priority = comparison.copy()
-
-priority["Air_Index"] = (
-    priority["Air_Risk_Score"] /
-    priority["Air_Risk_Score"].max()
-)
-
-
-# CRVA context
-crva_score = 7.14
-
-priority["Climate_Index"] = crva_score / 10
-
-
-# Because the CRVA score applies at ward level,
-# it is deliberately not pretending to distinguish
-# between the four areas.
-priority["Overall_Screening_Index"] = (
-    priority["Air_Index"] * 0.70
-    +
-    priority["Climate_Index"] * 0.30
-)
-
-
-priority = priority.sort_values(
-    "Overall_Screening_Index",
-    ascending=False
-)
-
-
-priority_display = priority[
-    [
-        "Zone",
-        "Air_Risk_Score",
-        "Air_Risk_Class",
-        "Overall_Screening_Index"
-    ]
-].copy()
-
-
-priority_display["Overall_Screening_Index"] = (
-    priority_display[
-        "Overall_Screening_Index"
-    ].round(3)
-)
-
-
 st.dataframe(
-    priority_display,
+    top_zones,
     use_container_width=True,
     hide_index=True
 )
 
 
-top_priority = priority.iloc[0]
+# ============================================================
+# ADMIN DATA VIEW
+# ============================================================
 
-
-if top_priority["Air_Risk_Class"] == "HIGH":
+if st.session_state.admin_mode:
 
     st.markdown(
-        f"""
-        <div class="risk-high">
-
-        <b>Highest screening priority:</b>
-        {top_priority['Zone']}
-
-        <br><br>
-
-        This area has the highest air-quality screening score
-        in the available zone analysis.
-
-        </div>
-        """,
+        '<div class="section">Administrator data inspection</div>',
         unsafe_allow_html=True
     )
 
-elif top_priority["Air_Risk_Class"] == "MODERATE":
-
-    st.markdown(
-        f"""
-        <div class="risk-medium">
-
-        <b>Highest screening priority:</b>
-        {top_priority['Zone']}
-
-        <br><br>
-
-        This area should receive further investigation because
-        it has the highest available air-quality screening score.
-
-        </div>
-        """,
-        unsafe_allow_html=True
+    st.info(
+        "This section is visible only when administrator mode "
+        "is enabled."
     )
 
-else:
+    st.write(
+        "Ladywood boundary records:",
+        len(ladywood)
+    )
 
-    st.markdown(
-        f"""
-        <div class="risk-low">
+    st.write(
+        "Brownfield records inside Ladywood:",
+        len(brownfield_data)
+    )
 
-        <b>Highest screening priority:</b>
-        {top_priority['Zone']}
+    st.write(
+        "Flood polygons intersecting Ladywood:",
+        flood_count
+    )
 
-        <br><br>
+    st.write(
+        "Greenspace polygons intersecting Ladywood:",
+        greenspace_count
+    )
 
-        Current available evidence does not indicate a high
-        air-quality screening category.
+    st.write(
+        "Woodland polygons intersecting Ladywood:",
+        woodland_count
+    )
 
-        </div>
-        """,
-        unsafe_allow_html=True
+    st.download_button(
+        "Download screening-zone results",
+        data=grid.to_csv(
+            index=False
+        ).encode("utf-8"),
+        file_name="Ladywood_environmental_screening.csv",
+        mime="text/csv"
     )
 
 
 # ============================================================
-# ENGINEERING INTERPRETATION
+# DATA LIMITATIONS
 # ============================================================
 
 st.markdown(
-    '<div class="section-title">Engineering interpretation</div>',
+    '<div class="section">How to interpret this dashboard</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
     """
-    <div class="method-box">
+    <div class="info-box">
 
-    <h3>How the dashboard makes the decision</h3>
-
-    <b>Step 1 — Measure</b><br>
-    Use the available Ladywood background-station air-quality data.
-
-    <br><br>
-
-    <b>Step 2 — Locate</b><br>
-    Use the real Birmingham GIS Ladywood boundary and environmental
-    spatial layers.
+    <b>Measured / official spatial evidence</b><br>
+    Birmingham's published environmental GIS layers are used
+    directly where available.
 
     <br><br>
 
-    <b>Step 3 — Identify environmental stressors</b><br>
-    Examine air pollution, flooding, climate vulnerability,
-    greenspace and brownfield evidence.
+    <b>Screening analysis</b><br>
+    The screening index is calculated by this dashboard from
+    official spatial features. It is not an official Birmingham
+    City Council risk score.
 
     <br><br>
 
-    <b>Step 4 — Compare development areas</b><br>
-    Apply the project's documented air screening calculation
-    to the four development areas.
+    <b>Air pollution</b><br>
+    The Birmingham NO₂ and PM2.5 layers are spatial datasets.
+    The dashboard therefore displays them as spatial evidence
+    rather than creating artificial four-zone measurements.
 
     <br><br>
 
-    <b>Step 5 — Prioritise</b><br>
-    The area with the strongest combined evidence becomes the
-    first area recommended for detailed investigation and
-    environmental intervention.
+    <b>Brownfield land</b><br>
+    Brownfield locations are retrieved from the UK Government
+    Planning Data service and restricted to sites falling
+    inside the Ladywood boundary.
+
+    <br><br>
+
+    <b>Flooding</b><br>
+    Flood polygons represent mapped flood-risk exposure. They
+    should not be interpreted as a prediction of exact flood
+    depth at a building.
 
     </div>
     """,
@@ -1235,61 +1596,34 @@ st.markdown(
 
 
 # ============================================================
-# DATA LIMITATIONS
-# ============================================================
-
-st.markdown(
-    '<div class="section-title">Important data limitations</div>',
-    unsafe_allow_html=True
-)
-
-st.warning(
-    """
-    The dashboard distinguishes between measured data and screening
-    estimates.
-
-    The air-quality station represents background conditions for
-    Ladywood. The four development-area air values are therefore
-    screening estimates based on the project multipliers; they are
-    not direct measurements at every location.
-
-    The Birmingham CRVA provides real spatial environmental evidence,
-    while the brownfield records identify documented sites.
-
-    Flood-risk polygons show mapped risk/exposure; they should not
-    be interpreted as a prediction of the exact depth of flooding
-    at a particular building.
-    """
-)
-
-
-# ============================================================
 # SOURCES
 # ============================================================
 
 st.markdown(
-    '<div class="section-title">Data sources</div>',
+    '<div class="section">Primary data sources</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
     """
-    **Birmingham City Council — Climate Risk and Vulnerability Assessment**
+    **Birmingham City Council — CRVA 2025 GIS**
 
-    https://maps.birmingham.gov.uk/server/rest/services/CRVA/CRVA_2025/MapServer
+    Birmingham City Council spatial data covering ward boundaries,
+    climate vulnerability, NO₂, PM2.5, flooding, greenspace,
+    woodland and vegetation/tree-canopy information.
 
-    **Birmingham Strategic Flood Risk Assessment**
+    **Birmingham City Council — Flood Risk Assessments**
 
-    https://www.birmingham.gov.uk/download/downloads/id/1203/level_1_strategic_flood_risk_assessment.pdf
+    Official Strategic Flood Risk Assessment material and
+    Ladywood map appendices.
 
     **UK Government Planning Data — Brownfield land**
 
-    https://www.planning.data.gov.uk/
+    Brownfield records supplied by Birmingham City Council.
 
-    **Project air-quality dataset**
+    **Birmingham City Council — Air Quality**
 
-    Ladywood_4_Zone_Air_Risk_Final.xlsx
-
+    Birmingham air-quality monitoring and modelling information.
     """
 )
 
@@ -1301,7 +1635,7 @@ st.markdown(
 st.markdown("---")
 
 st.caption(
-    "Ladywood Environmental Risk Dashboard | "
+    "Ladywood Environmental Risk & Climate Dashboard | "
     "Wits Mining Engineering project | "
-    "Environmental screening tool"
+    "Primary-source environmental screening"
 )
