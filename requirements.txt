@@ -1,5 +1,9 @@
 streamlit
 pandas
 numpy
+requests
+geopandas
+folium
 plotly
-openpyxl
+streamlit-folium
+shapely
