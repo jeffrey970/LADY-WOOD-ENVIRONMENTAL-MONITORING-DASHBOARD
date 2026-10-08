@@ -3,253 +3,663 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import time
+from pathlib import Path
 
-# ------------------------------------------------------------------------------
-# PAGE CONFIGURATION
-# ------------------------------------------------------------------------------
+# ============================================================
+# LADYWOOD AIR-RISK DASHBOARD
+# Data-driven Streamlit application
+# ============================================================
+
 st.set_page_config(
-    page_title="Ladywood Civic Digital Twin Dashboard",
-    page_icon="🌱",
+    page_title="Ladywood Air Risk Dashboard",
+    page_icon="ðŸŒ±",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom Styling
-st.markdown("""
-    <style>
-    .main { background-color: #f8f9fa; }
-    .stAlert { border-radius: 8px; }
-    .metric-card {
-        background-color: #ffffff;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0px 2px 6px rgba(0,0,0,0.05);
+# -----------------------------
+# Styling
+# -----------------------------
+st.markdown(
+    """ <style> .main {background-color: #f7f9fb;} .block-container {padding-top: 1.5rem;} .risk-high { padding: 12px; border-radius: 8px; background-color: #ffe5e5; border-left: 5px solid #d62728; } .risk-moderate { padding: 12px; border-radius: 8px; background-color: #fff4d6; border-left: 5px solid #e6a700; } .risk-low { padding: 12px; border-radius: 8px; background-color: #e5f6e9; border-left: 5px solid #2ca02c; } </style> """,
+    unsafe_allow_html=True,
+)
+
+# -----------------------------
+# Configuration
+# -----------------------------
+DEFAULT_FILE = "Ladywood_4_Zone_Air_Risk_Final.xlsx"
+
+ZONE_MULTIPLIERS = {
+    "City Centre": 1.15,
+    "Jewellery Quarter & Broad Street": 1.20,
+    "Park Central": 1.00,
+    "Remainder of Ladywood": 0.95,
+}
+
+WHO_GUIDELINES = {
+    "NO2": 10.0,
+    "PM2.5": 5.0,
+    "PM10": 15.0,
+}
+
+RISK_THRESHOLDS = {
+    "LOW_MAX": 100.0,
+    "MODERATE_MAX": 150.0,
+}
+
+# -----------------------------
+# Helper functions
+# -----------------------------
+@st.cache_data
+def load_workbook(file_path: str):
+    """Load the workbook sheets used by the dashboard."""
+    xls = pd.ExcelFile(file_path)
+
+    required = {
+        "Original_Monthly_Data",
+        "Station_Annual_Calcs",
+        "Zone_Year_Calcs",
+        "Zone_Risk_Summary",
+        "Methodology",
     }
-    </style>
-""", unsafe_allow_html=True)
 
-# ------------------------------------------------------------------------------
-# DATA GENERATION ENGINE (Simulating Ladywood Sensor Stream)
-# ------------------------------------------------------------------------------
-@st.cache_data(ttl=5)
-def generate_sensor_data():
-    now = datetime.now()
-    timestamps = [now - timedelta(minutes=i*5) for i in range(60)][::-1]
-    
-    # Base values reflecting Ladywood environmental parameters
-    np.random.seed(int(time.time()) % 1000)
-    
-    data = pd.DataFrame({
-        "Timestamp": timestamps,
-        # Urban Heat Island (UHI) Temperature (°C)
-        "Temp_LinkRoad": np.random.normal(31.5, 0.8, 60),  # High-density block
-        "Temp_Reservoir": np.random.normal(26.0, 0.5, 60), # Green baseline (Edgbaston Res)
-        # Canal & Water Quality
-        "Canal_Turbidity_NTU": np.random.normal(12.0, 3.5, 60),
-        "Canal_pH": np.random.normal(7.2, 0.3, 60),
-        "Water_Level_Meters": np.random.normal(1.4, 0.15, 60),
-        # Soil & Community Growing Beds
-        "Soil_Moisture_Pct": np.random.normal(22.0, 4.0, 60),
-        # Energy Micro-Grid (kW)
-        "Solar_PV_Output": np.clip(np.random.normal(45.0, 15.0, 60), 0, None)
-    })
-    
-    return data
+    missing = required.difference(xls.sheet_names)
+    if missing:
+        raise ValueError(
+            f"Workbook is missing required sheets: {', '.join(sorted(missing))}"
+        )
 
-df = generate_sensor_data()
-latest = df.iloc[-1]
+    return {
+        "monthly": pd.read_excel(file_path, sheet_name="Original_Monthly_Data"),
+        "station": pd.read_excel(file_path, sheet_name="Station_Annual_Calcs"),
+        "zone_year": pd.read_excel(file_path, sheet_name="Zone_Year_Calcs"),
+        "zone_summary": pd.read_excel(file_path, sheet_name="Zone_Risk_Summary"),
+        "methodology": pd.read_excel(file_path, sheet_name="Methodology"),
+    }
 
-# ------------------------------------------------------------------------------
-# SIDEBAR CONTROLS & LOCALIZATION
-# ------------------------------------------------------------------------------
-st.sidebar.title("🌱 Ladywood Civic Twin")
-st.sidebar.caption("Neighbourhood Doughnut Environmental Engine")
 
-# Language Selection for Digital Inclusion
-language = st.sidebar.selectbox(
-    "Select Language / Dil Chuniye", 
-    ["English", "Urdu (اردو)", "Punjabi (ਪੰਜਾਬੀ)", "Bengali (বাংলা)", "Polish (Polski)"]
+def weighted_mean(values, valid_counts):
+    """Calculate an observation-weighted mean, ignoring unavailable data."""
+    values = pd.to_numeric(values, errors="coerce")
+    valid_counts = pd.to_numeric(valid_counts, errors="coerce")
+
+    mask = values.notna() & valid_counts.notna() & (valid_counts > 0)
+
+    if not mask.any():
+        return np.nan
+
+    return np.average(values[mask], weights=valid_counts[mask])
+
+
+def calculate_station_annual(monthly):
+    """Recalculate annual station means from monthly data."""
+    rows = []
+
+    for year, group in monthly.groupby("Year", sort=True):
+        rows.append(
+            {
+                "Year": int(year),
+                "NO2": weighted_mean(
+                    group["NO2_Average"], group["NO2_Valid_Observations"]
+                ),
+                "NO2_Valid_Observations": group["NO2_Valid_Observations"].sum(),
+                "PM2.5": weighted_mean(
+                    group["PM2_5_Average"], group["PM2_5_Valid_Observations"]
+                ),
+                "PM2.5_Valid_Observations": group[
+                    "PM2_5_Valid_Observations"
+                ].sum(),
+                "PM10": weighted_mean(
+                    group["PM10_Average"], group["PM10_Valid_Observations"]
+                ),
+                "PM10_Valid_Observations": group[
+                    "PM10_Valid_Observations"
+                ].sum(),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def risk_class(no2_percent, pm25_percent):
+    """Dashboard screening classification."""
+    if pd.isna(no2_percent) or pd.isna(pm25_percent):
+        return "NO DATA"
+
+    score = (no2_percent + pm25_percent) / 2
+
+    if score <= RISK_THRESHOLDS["LOW_MAX"]:
+        return "LOW"
+    elif score <= RISK_THRESHOLDS["MODERATE_MAX"]:
+        return "MODERATE"
+    return "HIGH"
+
+
+def calculate_zone_results(station_annual):
+    """Calculate estimated zone concentrations and risk from station data."""
+    rows = []
+
+    for _, station in station_annual.iterrows():
+        year = int(station["Year"])
+
+        for zone, multiplier in ZONE_MULTIPLIERS.items():
+            no2 = station["NO2"] * multiplier
+            pm25 = station["PM2.5"] * multiplier
+            pm10 = station["PM10"] * multiplier
+
+            no2_pct = (no2 / WHO_GUIDELINES["NO2"]) * 100
+            pm25_pct = (pm25 / WHO_GUIDELINES["PM2.5"]) * 100
+            pm10_pct = (pm10 / WHO_GUIDELINES["PM10"]) * 100
+
+            score = (no2_pct + pm25_pct) / 2
+
+            rows.append(
+                {
+                    "Year": year,
+                    "Zone": zone,
+                    "Air_Multiplier": multiplier,
+                    "NO2_Station": station["NO2"],
+                    "NO2_Calculated": no2,
+                    "NO2_WHO_Percent": no2_pct,
+                    "PM2.5_Station": station["PM2.5"],
+                    "PM2.5_Calculated": pm25,
+                    "PM2.5_WHO_Percent": pm25_pct,
+                    "PM10_Station": station["PM10"],
+                    "PM10_Calculated": pm10,
+                    "PM10_WHO_Percent": pm10_pct,
+                    "Air_Risk_Score": score,
+                    "Air_Risk_Class": risk_class(no2_pct, pm25_pct),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def risk_colour_class(value):
+    if value == "HIGH":
+        return "risk-high"
+    if value == "MODERATE":
+        return "risk-moderate"
+    if value == "LOW":
+        return "risk-low"
+    return ""
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+st.sidebar.title("ðŸŒ± Ladywood Air Risk")
+st.sidebar.caption("Data-driven environmental screening dashboard")
+
+uploaded = st.sidebar.file_uploader(
+    "Use another Ladywood Excel workbook",
+    type=["xlsx"],
+    help="Upload a workbook with the same required sheet structure.",
 )
 
-st.sidebar.divider()
-
-# Simulation Overrides (For Testing Automated Interventions)
-st.sidebar.subheader("⚙️ Local Scenario Injector")
-sim_heatwave = st.sidebar.checkbox("Simulate Extreme Heat Spike")
-sim_spill = st.sidebar.checkbox("Simulate CSO Water Spill Event")
-
-if sim_heatwave:
-    latest["Temp_LinkRoad"] = 36.8
-if sim_spill:
-    latest["Canal_Turbidity_NTU"] = 48.5
-    latest["Canal_pH"] = 5.8
-
-st.sidebar.divider()
-st.sidebar.info("Connected to LoRaWAN Gateway: Ladywood Public Square Node #01")
-
-# ------------------------------------------------------------------------------
-# HEADER SECTION
-# ------------------------------------------------------------------------------
-st.title("Ladywood Interactive Environmental Dashboard")
-st.markdown("Real-time telemetry, automated micro-interventions, and ecological boundary tracking.")
-
-# ------------------------------------------------------------------------------
-# AUTOMATED DECISION ENGINE (AUTOMATED ALERTS)
-# ------------------------------------------------------------------------------
-uhi_diff = latest["Temp_LinkRoad"] - latest["Temp_Reservoir"]
-
-if latest["Temp_LinkRoad"] > 35.0 or uhi_diff > 5.0:
-    st.error(f"""
-        🔥 **AUTOMATED ALERT: URBAN HEAT ISLAND CRITICAL**  
-        * **Link Road High-Density Block:** {latest['Temp_LinkRoad']:.1f}°C (Differential: +{uhi_diff:.1f}°C vs Reservoir)  
-        * **Action Triggered:** Public Misting Systems Activated at Public Square | SMS Heat Warnings Dispatched to Vulnerable Households.
-    """)
-elif latest["Canal_Turbidity_NTU"] > 35.0 or latest["Canal_pH"] < 6.0:
-    st.warning(f"""
-        ⚠️ **AUTOMATED ALERT: CANAL WATER CONTAMINATION DETECTED**  
-        * **Turbidity:** {latest['Canal_Turbidity_NTU']:.1f} NTU | **pH:** {latest['Canal_pH']:.2f}  
-        * **Action Triggered:** Automated Runoff Isolation Gate Closed at Canal Loop | Canoeists & Water Users Notified via SMS.
-    """)
+if uploaded is not None:
+    workbook_source = uploaded
 else:
-    st.success("✅ **SYSTEM HEALTH NORMAL:** Environmental boundaries within safe operational limits.")
+    workbook_source = DEFAULT_FILE
 
+if isinstance(workbook_source, str) and not Path(workbook_source).exists():
+    st.error(
+        f"Could not find `{DEFAULT_FILE}`. Put the Excel file in the same folder as app.py."
+    )
+    st.stop()
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+try:
+    data = load_workbook(workbook_source)
+except Exception as exc:
+    st.error(f"Could not load the workbook: {exc}")
+    st.stop()
+
+monthly = data["monthly"].copy()
+station_original = data["station"].copy()
+zone_original = data["zone_year"].copy()
+summary_original = data["zone_summary"].copy()
+methodology = data["methodology"].copy()
+
+# Recalculate rather than trusting hard-coded dashboard outputs
+station_calc = calculate_station_annual(monthly)
+zone_calc = calculate_zone_results(station_calc)
+
+# Ensure numeric fields are numeric
+for frame in [monthly, station_calc, zone_calc, summary_original]:
+    for column in frame.columns:
+        if column not in ["Month", "Year_Month", "Zone", "Air_Risk_Class"]:
+            frame[column] = pd.to_numeric(frame[column], errors="ignore")
+
+# ============================================================
+# HEADER
+# ============================================================
+st.title("Ladywood Interactive Air-Risk Dashboard")
+st.markdown(
+    """ **Purpose:** use Ladywood monitoring data to identify air-pollution trends, compare the four development-plan zones, and transparently screen relative air-risk areas. """
+)
+
+st.info(
+    "Important: the monitoring station is a spatial measurement point. "
+    "Zone concentrations shown here are calculated estimates using the project "
+    "screening multipliers; they are not direct measurements inside each zone."
+)
+
+# ============================================================
+# SIDEBAR FILTERS
+# ============================================================
+available_years = sorted(station_calc["Year"].dropna().astype(int).unique())
+selected_year = st.sidebar.selectbox(
+    "Analysis year",
+    available_years,
+    index=len(available_years) - 1,
+)
+
+selected_zone = st.sidebar.selectbox(
+    "Zone",
+    ["All zones"] + list(ZONE_MULTIPLIERS.keys()),
+)
+
+# ============================================================
+# SELECTED DATA
+# ============================================================
+year_station = station_calc[station_calc["Year"] == selected_year].iloc[0]
+year_zones = zone_calc[zone_calc["Year"] == selected_year].copy()
+
+if selected_zone != "All zones":
+    displayed_zones = year_zones[year_zones["Zone"] == selected_zone].copy()
+else:
+    displayed_zones = year_zones.copy()
+
+# ============================================================
+# KPI ROW
+# ============================================================
+c1, c2, c3, c4 = st.columns(4)
+
+with c1:
+    st.metric("Station NOâ‚‚", f"{year_station['NO2']:.2f} Âµg/mÂ³")
+
+with c2:
+    st.metric("Station PMâ‚‚.â‚…", f"{year_station['PM2.5']:.2f} Âµg/mÂ³")
+
+with c3:
+    st.metric("Station PMâ‚â‚€", f"{year_station['PM10']:.2f} Âµg/mÂ³")
+
+with c4:
+    highest = year_zones.sort_values("Air_Risk_Score", ascending=False).iloc[0]
+    st.metric(
+        "Highest estimated zone risk",
+        highest["Zone"],
+        f"{highest['Air_Risk_Score']:.1f} score",
+    )
+
+# ============================================================
+# MAIN TABS
+# ============================================================
+tab_overview, tab_trends, tab_zones, tab_data, tab_method = st.tabs(
+    [
+        "ðŸ“Š Overview",
+        "ðŸ“ˆ Trends",
+        "ðŸ“ Zone Risk",
+        "ðŸ”Ž Data & Calculations",
+        "ðŸ“š Methodology",
+    ]
+)
+
+# ============================================================
+# OVERVIEW
+# ============================================================
+with tab_overview:
+    st.subheader(f"Air-risk overview â€” {selected_year}")
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        chart = px.bar(
+            displayed_zones,
+            x="Zone",
+            y="Air_Risk_Score",
+            color="Air_Risk_Class",
+            text="Air_Risk_Score",
+            title="Estimated air-risk score by zone",
+            labels={"Air_Risk_Score": "Risk score (%)"},
+        )
+        chart.add_hline(
+            y=100,
+            line_dash="dash",
+            annotation_text="100% threshold",
+        )
+        chart.add_hline(
+            y=150,
+            line_dash="dash",
+            annotation_text="150% threshold",
+        )
+        chart.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+        st.plotly_chart(chart, use_container_width=True)
+
+    with col_b:
+        pollutant_data = displayed_zones[
+            ["Zone", "NO2_WHO_Percent", "PM2.5_WHO_Percent", "PM10_WHO_Percent"]
+        ].melt(
+            id_vars="Zone",
+            var_name="Pollutant",
+            value_name="WHO_Percent",
+        )
+
+        pollutant_data["Pollutant"] = pollutant_data["Pollutant"].str.replace(
+            "_WHO_Percent", "", regex=False
+        )
+
+        chart2 = px.bar(
+            pollutant_data,
+            x="Zone",
+            y="WHO_Percent",
+            color="Pollutant",
+            barmode="group",
+            title="Estimated pollutant concentration relative to WHO guideline",
+            labels={"WHO_Percent": "Percentage of WHO guideline"},
+        )
+        chart2.add_hline(y=100, line_dash="dash", annotation_text="100%")
+        st.plotly_chart(chart2, use_container_width=True)
+
+    st.subheader("Priority zones")
+
+    ranking = year_zones.sort_values("Air_Risk_Score", ascending=False).copy()
+    ranking.insert(0, "Rank", range(1, len(ranking) + 1))
+
+    st.dataframe(
+        ranking[
+            [
+                "Rank",
+                "Zone",
+                "Air_Multiplier",
+                "NO2_Calculated",
+                "PM2.5_Calculated",
+                "Air_Risk_Score",
+                "Air_Risk_Class",
+            ]
+        ].round(2),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+# ============================================================
+# TRENDS
+# ============================================================
+with tab_trends:
+    st.subheader("Ladywood station pollutant trends")
+
+    pollutant = st.selectbox(
+        "Pollutant",
+        ["NO2", "PM2.5", "PM10"],
+        key="trend_pollutant",
+    )
+
+    trend = station_calc[["Year", pollutant]].copy()
+
+    fig = px.line(
+        trend,
+        x="Year",
+        y=pollutant,
+        markers=True,
+        title=f"Annual {pollutant} trend at the Ladywood monitoring station",
+        labels={pollutant: f"{pollutant} (Âµg/mÂ³)"},
+    )
+
+    guideline = WHO_GUIDELINES[pollutant]
+    fig.add_hline(
+        y=guideline,
+        line_dash="dash",
+        annotation_text=f"WHO annual guideline: {guideline} Âµg/mÂ³",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Monthly observations")
+
+    monthly_plot = monthly.copy()
+    monthly_plot["Date"] = pd.to_datetime(
+        monthly_plot["Year_Month"] + "-01",
+        errors="coerce",
+    )
+
+    monthly_pollutant_column = {
+        "NO2": "NO2_Average",
+        "PM2.5": "PM2_5_Average",
+        "PM10": "PM10_Average",
+    }[pollutant]
+
+    monthly_plot = monthly_plot.dropna(
+        subset=["Date", monthly_pollutant_column]
+    )
+
+    fig_month = px.line(
+        monthly_plot,
+        x="Date",
+        y=monthly_pollutant_column,
+        markers=True,
+        title=f"Monthly {pollutant} measurements",
+        labels={monthly_pollutant_column: f"{pollutant} (Âµg/mÂ³)"},
+    )
+
+    st.plotly_chart(fig_month, use_container_width=True)
+
+    st.caption(
+        "Missing observations are left missing. The dashboard does not replace "
+        "missing months with zero."
+    )
+
+# ============================================================
+# ZONE RISK
+# ============================================================
+with tab_zones:
+    st.subheader("Four-zone air-risk comparison")
+
+    st.write(
+        "The four zones are development-plan screening zones. "
+        "They are not separate monitoring stations."
+    )
+
+    zone_choice = st.selectbox(
+        "Choose zone for detailed calculation",
+        list(ZONE_MULTIPLIERS.keys()),
+        key="zone_detail",
+    )
+
+    z = year_zones[year_zones["Zone"] == zone_choice].iloc[0]
+
+    a, b, c = st.columns(3)
+
+    with a:
+        st.metric(
+            "Estimated NOâ‚‚",
+            f"{z['NO2_Calculated']:.2f} Âµg/mÂ³",
+            f"{z['NO2_WHO_Percent']:.1f}% of WHO guideline",
+        )
+
+    with b:
+        st.metric(
+            "Estimated PMâ‚‚.â‚…",
+            f"{z['PM2.5_Calculated']:.2f} Âµg/mÂ³",
+            f"{z['PM2.5_WHO_Percent']:.1f}% of WHO guideline",
+        )
+
+    with c:
+        st.metric(
+            "Air-risk score",
+            f"{z['Air_Risk_Score']:.1f}",
+            z["Air_Risk_Class"],
+        )
+
+    st.markdown(
+        f""" **Calculation chain** Station concentration â†’ Ã— **{z['Air_Multiplier']:.2f} zone multiplier** â†’ estimated zone concentration â†’ Ã· WHO guideline Ã— 100 â†’ pollutant percentages â†’ average NOâ‚‚ and PMâ‚‚.â‚… percentages â†’ **air-risk score** â†’ risk class. """
+    )
+
+    detail = pd.DataFrame(
+        {
+            "Measure": [
+                "Station NOâ‚‚",
+                "Zone NOâ‚‚",
+                "NOâ‚‚ WHO %",
+                "Station PMâ‚‚.â‚…",
+                "Zone PMâ‚‚.â‚…",
+                "PMâ‚‚.â‚… WHO %",
+                "Station PMâ‚â‚€",
+                "Zone PMâ‚â‚€",
+                "PMâ‚â‚€ WHO %",
+                "Air-risk score",
+                "Risk class",
+            ],
+            "Value": [
+                z["NO2_Station"],
+                z["NO2_Calculated"],
+                z["NO2_WHO_Percent"],
+                z["PM2.5_Station"],
+                z["PM2.5_Calculated"],
+                z["PM2.5_WHO_Percent"],
+                z["PM10_Station"],
+                z["PM10_Calculated"],
+                z["PM10_WHO_Percent"],
+                z["Air_Risk_Score"],
+                z["Air_Risk_Class"],
+            ],
+        }
+    )
+
+    st.dataframe(detail.round(2), use_container_width=True, hide_index=True)
+
+# ============================================================
+# DATA & CALCULATIONS
+# ============================================================
+with tab_data:
+    st.subheader("Data quality and calculation audit")
+
+    st.write(
+        "This section is deliberately included so the dashboard can be checked "
+        "rather than treated as a black box."
+    )
+
+    st.write("### Monthly source data")
+    st.dataframe(monthly, use_container_width=True, hide_index=True)
+
+    st.write("### Recalculated station annual values")
+    st.dataframe(
+        station_calc.round(4),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.write("### Zone calculations")
+    st.dataframe(
+        zone_calc.round(3),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.write("### Data completeness")
+
+    completeness = pd.DataFrame(
+        {
+            "Year": station_calc["Year"],
+            "NO2 valid observations": station_calc["NO2_Valid_Observations"],
+            "PM2.5 valid observations": station_calc[
+                "PM2.5_Valid_Observations"
+            ],
+            "PM10 valid observations": station_calc[
+                "PM10_Valid_Observations"
+            ],
+        }
+    )
+
+    st.dataframe(
+        completeness,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption(
+        "Valid observation counts come from the source workbook. "
+        "Unavailable measurements are not converted to zero."
+    )
+
+# ============================================================
+# METHODOLOGY
+# ============================================================
+with tab_method:
+    st.subheader("Methodology and limitations")
+
+    st.write("### 1. Station annual calculation")
+    st.code(
+        "Annual mean = Î£(monthly mean Ã— valid observations) / Î£(valid observations)",
+        language="text",
+    )
+
+    st.write("### 2. Zone estimate")
+    st.code(
+        "Estimated zone concentration = station concentration Ã— zone multiplier",
+        language="text",
+    )
+
+    st.write("### 3. WHO comparison")
+    st.code(
+        "WHO percentage = estimated concentration / WHO guideline Ã— 100",
+        language="text",
+    )
+
+    st.write("### 4. Air-risk score")
+    st.code(
+        "Air-risk score = (NOâ‚‚ WHO % + PMâ‚‚.â‚… WHO %) / 2",
+        language="text",
+    )
+
+    st.write("### 5. Screening classification")
+    st.code(
+        """if score <= 100: LOW elif score <= 150: MODERATE else: HIGH""",
+        language="python",
+    )
+
+    st.write("### Project zone multipliers")
+    multiplier_table = pd.DataFrame(
+        {
+            "Zone": list(ZONE_MULTIPLIERS.keys()),
+            "Multiplier": list(ZONE_MULTIPLIERS.values()),
+            "Interpretation": [
+                "Project screening assumption",
+                "Project screening assumption",
+                "Project screening assumption",
+                "Project screening assumption",
+            ],
+        }
+    )
+
+    st.dataframe(
+        multiplier_table,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.warning(
+        "The zone multipliers are project screening assumptions, not official "
+        "DEFRA or Birmingham City Council constants. The dashboard therefore "
+        "presents zone values as estimates and relative screening results, "
+        "not direct measurements or legal compliance determinations."
+    )
+
+    st.write("### 2026")
+    st.info(
+        "If 2026 contains only year-to-date observations, interpret its annual "
+        "values as provisional/YTD rather than as a completed calendar-year average."
+    )
+
+# ============================================================
+# FOOTER
+# ============================================================
 st.divider()
 
-# ------------------------------------------------------------------------------
-# KEY METRICS ROW
-# ------------------------------------------------------------------------------
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric(
-        label="Link Road Temperature", 
-        value=f"{latest['Temp_LinkRoad']:.1f} °C", 
-        delta=f"+{uhi_diff:.1f} °C vs Green Pocket",
-        delta_color="inverse"
-    )
-
-with col2:
-    st.metric(
-        label="Canal Turbidity", 
-        value=f"{latest['Canal_Turbidity_NTU']:.1f} NTU", 
-        delta="-3.2 NTU (1 hr)" if not sim_spill else "+28.5 NTU CRISIS",
-        delta_color="inverse"
-    )
-
-with col3:
-    st.metric(
-        label="Growing Soil Moisture", 
-        value=f"{latest['Soil_Moisture_Pct']:.1f} %", 
-        delta="Optimal (20-30%)" if 20 <= latest['Soil_Moisture_Pct'] <= 30 else "Low Irrigation Needed"
-    )
-
-with col4:
-    st.metric(
-        label="Community Solar Gen.", 
-        value=f"{latest['Solar_PV_Output']:.1f} kW", 
-        delta="+8.4 kW Grid Feed"
-    )
-
-# ------------------------------------------------------------------------------
-# DASHBOARD TABS
-# ------------------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(["🌡️ Microclimate & Heat", "🌊 Water & Canal Health", "📍 Interactive Spatial Map"])
-
-# TAB 1: URBAN HEAT ISLAND
-with tab1:
-    st.subheader("Urban Heat Island (UHI) Dynamics")
-    st.caption("Comparing built-up high-density residential blocks against reference green spaces (Edgbaston Reservoir).")
-    
-    fig_heat = px.line(
-        df, 
-        x="Timestamp", 
-        y=["Temp_LinkRoad", "Temp_Reservoir"],
-        labels={"value": "Temperature (°C)", "variable": "Sensor Location"},
-        color_discrete_map={"Temp_LinkRoad": "#e74c3c", "Temp_Reservoir": "#2ecc71"},
-        title="60-Minute Temperature Comparison Stream"
-    )
-    fig_heat.update_layout(hovermode="x unified", legend_title_text="Sensor Location")
-    st.plotly_chart(fig_heat, use_container_width=True)
-
-# TAB 2: WATER & CANAL MONITORING
-with tab2:
-    st.subheader("Canal Loop & Runoff Water Quality")
-    col_w1, col_w2 = st.columns(2)
-    
-    with col_w1:
-        fig_water = px.area(
-            df, 
-            x="Timestamp", 
-            y="Canal_Turbidity_NTU",
-            title="Canal Turbidity Levels (NTU)",
-            color_discrete_sequence=["#3498db"]
-        )
-        fig_water.add_hline(y=35.0, line_dash="dash", line_color="red", annotation_text="Pollution Trigger Limit")
-        st.plotly_chart(fig_water, use_container_width=True)
-        
-    with col_w2:
-        fig_ph = px.line(
-            df, 
-            x="Timestamp", 
-            y="Canal_pH",
-            title="Real-Time pH Levels",
-            color_discrete_sequence=["#9b59b6"]
-        )
-        fig_ph.add_hline(y=6.5, line_dash="dash", line_color="orange", annotation_text="Acidity Alert Threshold")
-        st.plotly_chart(fig_ph, use_container_width=True)
-
-# TAB 3: SPATIAL MAP
-with tab3:
-    st.subheader("Ladywood Sensor Deployment Map")
-    st.caption("Live spatial network nodes across Ladywood ward.")
-    
-    # Coordinates centered around Ladywood, Birmingham
-    map_data = pd.DataFrame({
-        'lat': [52.4790, 52.4765, 52.4821, 52.4740],
-        'lon': [-1.9210, -1.9300, -1.9150, -1.9100],
-        'Node_Name': [
-            'Link Road High-Density Block', 
-            'Edgbaston Reservoir Baseline', 
-            'Ladywood Canal Junction', 
-            'Neighbourhood Public Square Hub'
-        ],
-        'Status': ['Active (High Temp)', 'Active (Normal)', 'Active (Monitoring)', 'Active Hub']
-    })
-    
-    fig_map = px.scatter_mapbox(
-        map_data,
-        lat="lat",
-        lon="lon",
-        hover_name="Node_Name",
-        hover_data=["Status"],
-        zoom=13,
-        height=450
-    )
-    fig_map.update_layout(mapbox_style="open-street-map")
-    fig_map.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
-    st.plotly_chart(fig_map, use_container_width=True)
-
-# ------------------------------------------------------------------------------
-# FOOTER & PHYSICAL E-INK DISPLAY SIMULATOR
-# ------------------------------------------------------------------------------
-st.divider()
-st.subheader("📟 Public Hub E-Ink Physical Display Preview")
-st.caption("Rendering low-power output for non-digital screen terminals at public hubs.")
-
-eink_container = st.container()
-with eink_container:
-    st.code(f"""
-============================================================
-           LADYWOOD COMMUNITY ENVIRONMENTAL MONITOR         
-============================================================
-TIME: {latest['Timestamp'].strftime('%H:%M:%S')} | STATUS: {'⚠️ ALERT ACTIVE' if (sim_heatwave or sim_spill) else '✅ SAFE'}
-
-[HEAT INDEX]   Link Road: {latest['Temp_LinkRoad']:.1f}°C  | Reservoir: {latest['Temp_Reservoir']:.1f}°C
-[WATER QUAL]   Turbidity: {latest['Canal_Turbidity_NTU']:.1f} NTU | pH: {latest['Canal_pH']:.2f}
-[SOLAR GEN ]   Current Output: {latest['Solar_PV_Output']:.1f} kW
-
-NOTIFICATION: {'Extreme Heat Detected. Cool Down Hub Open at Public Square.' if sim_heatwave else 'Air and Water levels within safe healthy bounds today.'}
-============================================================
-    """, language="text")
+st.caption(
+    "Ladywood Air-Risk Dashboard | Built from the supplied monitoring workbook | "
+    "No synthetic sensor stream is generated."
+)
