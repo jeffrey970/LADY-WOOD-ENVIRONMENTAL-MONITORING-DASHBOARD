@@ -194,18 +194,69 @@ def get_feature_layer(url, where="1=1"):
 @st.cache_data(ttl=3600)
 def get_ladywood():
 
+    # Retrieve the official Birmingham ward layer first.
+    # We deliberately do not assume the exact SQL spelling
+    # of the ward name.
+
     wards = get_feature_layer(
         WARD_LAYER,
-        "WARDNME LIKE '%Ladywood%'"
+        "1=1"
     )
 
     if wards.empty:
         raise ValueError(
-            "The official Birmingham Ladywood ward boundary "
-            "could not be retrieved."
+            "The official Birmingham ward boundary service "
+            "returned no features."
         )
 
-    return wards
+    # Find Ladywood from the returned official ward names.
+    name_column = "WARDNME"
+
+    if name_column not in wards.columns:
+        raise ValueError(
+            "The Birmingham ward layer does not contain "
+            "the expected WARDNME field."
+        )
+
+    ladywood = wards[
+        wards[name_column]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .eq("ladywood")
+    ].copy()
+
+    # Fallback in case the published name contains
+    # additional wording.
+    if ladywood.empty:
+
+        ladywood = wards[
+            wards[name_column]
+            .astype(str)
+            .str.contains(
+                "ladywood",
+                case=False,
+                na=False
+            )
+        ].copy()
+
+    if ladywood.empty:
+
+        available = sorted(
+            wards[name_column]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+
+        raise ValueError(
+            "The Birmingham service loaded successfully, "
+            "but Ladywood could not be identified. "
+            f"Ward names returned: {available}"
+        )
+
+    return ladywood
 
 
 # ============================================================
