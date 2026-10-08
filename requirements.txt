@@ -7,3 +7,5 @@ folium
 plotly
 streamlit-folium
 shapely
+pyproj
+fiona
