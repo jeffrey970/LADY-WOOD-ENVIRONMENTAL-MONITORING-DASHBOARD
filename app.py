@@ -622,7 +622,16 @@ st.markdown(
 
 
 # Find map centre
-centroid = ladywood.geometry.union_all().centroid
+ladywood_polygon = unary_union(
+    ladywood.geometry
+)
+
+centroid = ladywood_polygon.centroid
+
+map_center = [
+    centroid.y,
+    centroid.x
+]
 
 map_center = [
     centroid.y,
