@@ -29,8 +29,7 @@ st.set_page_config(
 st.title("Ladywood Environmental Monitoring Dashboard")
 
 st.caption(
-    "Ladywood, Birmingham, UK | Environmental screening using official "
-    "Birmingham City Council and DEFRA data"
+    "Ladywood, Birmingham, UK Environmental Dashboard"
 )
 
 
