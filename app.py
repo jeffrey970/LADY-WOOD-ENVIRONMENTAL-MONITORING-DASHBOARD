@@ -1670,8 +1670,8 @@ st.subheader(
 st.caption(
     "Use the layer control in the top-right of the map to "
     "turn environmental layers on and off. The coloured "
-    "markers identify the screening result for each official "
-    "Ladywood LSOA."
+    "markers identify the assessment result for each official "
+    "Ladywood LSOA(Small neighbhourhood)."
 )
 
 st.components.v1.html(
@@ -1682,19 +1682,19 @@ st.components.v1.html(
 
 
 # ============================================================
-# ENVIRONMENTAL SCREENING TABLE
+# ENVIRONMENTAL assessment TABLE
 # ============================================================
 
 st.subheader(
-    "Environmental Screening Classification"
+    "Environmental assessment Classification"
 )
 
 st.caption(
-    "This table compares the official Ladywood LSOA areas "
+    "This table compares the official Ladywood LSOA(small neighbhourhoods) areas "
     "using climate/environmental vulnerability, flood exposure "
     "and brownfield exposure. The indicators are normalised "
-    "before being combined into a transparent screening index. "
-    "Missing source data are not converted into artificial zeros."
+    "before being combined into a transparent assessment index. "
+    "Missing source data are not converted into artificial zeros(its represented as blank)."
 )
 
 
@@ -1736,15 +1736,15 @@ st.subheader(
 )
 
 st.caption(
-    "Priority is based on the environmental screening index. "
-    "This is an engineering screening calculation for the "
+    "Priority is based on the environmental assessment index. "
+    "This is an engineering assessment calculation for the "
     "project, not an official Birmingham statutory risk rating."
 )
 
 
 st.markdown(
     """
-**Screening calculation**
+**assessment calculation**
 
 \[
 E = \\frac{C + F + B}{3}
@@ -1776,7 +1776,7 @@ priority_df = risk_df[
 if priority_df.empty:
 
     st.info(
-        "No Ladywood LSOA reached the HIGH screening "
+        "No Ladywood LSOA reached the HIGH assessment "
         "category using this calculation."
     )
 
@@ -1790,7 +1790,7 @@ if priority_df.empty:
     if not moderate_df.empty:
 
         st.write(
-            "**Highest MODERATE screening areas:**"
+            "**Highest MODERATE assessment areas:**"
         )
 
         st.dataframe(
@@ -1831,7 +1831,7 @@ st.subheader(
 )
 
 st.caption(
-    "Higher values indicate higher combined screening scores "
+    "Higher values indicate higher combined assessment scores "
     "from climate/environmental vulnerability, flood exposure "
     "and brownfield exposure."
 )
@@ -1893,8 +1893,8 @@ st.subheader(
 )
 
 st.caption(
-    "Percentage of each official Ladywood LSOA intersecting "
-    "the combined flood screening extent. Flood Zone 3 and "
+    "Percentage of each official Ladywood LSOA(small neighbhourhood) intersecting "
+    "the combined flood assessment extent. Flood Zone 3 and "
     "surface flooding are kept as separate map layers."
 )
 
@@ -2275,12 +2275,12 @@ st.dataframe(
 # ============================================================
 
 st.subheader(
-    "Engineering Screening Interpretation"
+    "Engineering assessment Interpretation"
 )
 
 st.caption(
     "The dashboard applies a source → pathway → receptor "
-    "screening approach. Environmental indicators identify "
+    "assessment approach. Environmental indicators identify "
     "where further engineering investigation may be useful; "
     "they do not replace site investigation or statutory "
     "environmental assessment."
@@ -2317,12 +2317,12 @@ download_df = risk_df[
 
 
 st.download_button(
-    label="Download Ladywood Environmental Screening Results",
+    label="Download Ladywood Environmental assessment Results",
     data=download_df.to_csv(
         index=False
     ),
     file_name=(
-        "Ladywood_Environmental_Screening.csv"
+        "Ladywood_Environmental_assessment.csv"
     ),
     mime="text/csv"
 )
