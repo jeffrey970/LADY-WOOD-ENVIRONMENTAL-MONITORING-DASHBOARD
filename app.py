@@ -794,7 +794,7 @@ risk_df["Brownfield_Index"] = normalise(
 
 
 # ============================================================
-# ENVIRONMENTAL ASSESSMENT INDEX
+# ENVIRONMENTAL ASSESSMENT INDEX CALCULATION
 # ============================================================
 
 risk_df["Environmental_Index"] = (
@@ -1507,27 +1507,6 @@ st.caption(
 )
 
 
-st.markdown(
-    """
-**assessment calculation**
-
-\[
-E = \\frac{C + F + B}{3}
-\]
-
-where:
-
-- **C** = normalised climate/environmental vulnerability
-- **F** = normalised flood exposure
-- **B** = normalised brownfield exposure
-
-Risk classification:
-
-- **HIGH:** E ≥ 0.67
-- **MODERATE:** 0.34 ≤ E < 0.67
-- **LOW:** E < 0.34
-"""
-)
 
 
 priority_df = risk_df[
