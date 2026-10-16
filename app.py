@@ -768,10 +768,10 @@ ladywood_center = transform(
 )
 
 m = folium.Map(
-    location=[ladywood_center.y, ladywood_center.x],
+    location=[center_wgs.y, center_wgs.x],
     zoom_start=14,
     control_scale=True,
-    tiles="CartoDB positron"
+    tiles="OpenStreetMap"
 )
 
 
