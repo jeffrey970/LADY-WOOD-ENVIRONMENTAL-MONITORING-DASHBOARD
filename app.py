@@ -9,9 +9,7 @@ from shapely.geometry import (
     MultiPolygon,
     LineString,
     MultiLineString,
-    Point,
-    mapping,
-    shape,
+    Point
 )
 from shapely.ops import transform, unary_union
 from pyproj import Transformer
@@ -28,7 +26,10 @@ st.set_page_config(
 )
 
 st.title("Ladywood Environmental Monitoring Dashboard")
-st.caption("Ladywood, Birmingham, UK")
+
+st.caption(
+    "Ladywood, Birmingham, UK Environmental Dashboard"
+)
 
 
 # ============================================================
@@ -40,17 +41,10 @@ CRVA = (
     "CRVA/CRVA_2025/MapServer"
 )
 
-WARD_LAYER = (
-    "https://maps.birmingham.gov.uk/server/rest/services/"
-    "Internet_Boundaries/MapServer/0"
-)
-
+WARD_LAYER = CRVA + "/14"
 LSOA_LAYER = CRVA + "/17"
 
-# Flood Zone 3 - High Probability
 FLOOD_ZONE_3_LAYER = CRVA + "/109"
-
-# Surface-water flooding
 SURFACE_FLOOD_LAYER = CRVA + "/1546"
 
 BROWNFIELD_LAYER = (
@@ -79,44 +73,96 @@ to_wgs84 = Transformer.from_crs(
 
 
 # ============================================================
-# SESSION AND GENERAL HELPERS
+# GENERAL HELPERS
 # ============================================================
 
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "LadywoodEnvironmentalDashboard/1.0"
-})
+def clean_number(value):
+    """Convert common DEFRA numeric formats to numbers."""
+
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+
+    if text == "":
+        return None
+
+    text = text.replace(",", "")
+
+    # DEFRA may contain < or > qualifiers.
+    text = text.replace("<", "")
+    text = text.replace(">", "")
+
+    try:
+        return float(text)
+    except Exception:
+        return None
 
 
 def normalise_column_name(name):
+    """Make column names easier to search."""
+
     text = str(name).lower().strip()
+
     text = text.replace("₂", "2")
     text = text.replace("₅", "5")
-    return re.sub(r"[^a-z0-9]+", "", text)
 
-
-# ============================================================
-# ARCGIS REQUEST
-# ============================================================
-
-def arcgis_request(url, params=None):
-    request_params = {"f": "json"}
-
-    if params:
-        request_params.update(params)
-
-    response = session.get(
-        url,
-        params=request_params,
-        timeout=90
+    text = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        text
     )
+
+    return text
+
+
+# ============================================================
+# ARC GIS
+# ============================================================
+
+def arcgis_request(
+    layer_url,
+    where="1=1",
+    geometry=None,
+    result_offset=0
+):
+
+    params = {
+        "where": where,
+        "outFields": "*",
+        "returnGeometry": "true",
+        "outSR": "27700",
+        "f": "json"
+    }
+
+    if geometry is not None:
+
+        params["geometry"] = ",".join(
+            str(round(v, 2))
+            for v in geometry
+        )
+
+        params["geometryType"] = "esriGeometryEnvelope"
+        params["inSR"] = "27700"
+        params["spatialRel"] = "esriSpatialRelIntersects"
+
+    if result_offset:
+        params["resultOffset"] = result_offset
+        params["resultRecordCount"] = 1000
+
+    response = requests.get(
+        layer_url + "/query",
+        params=params,
+        timeout=60
+    )
+
     response.raise_for_status()
 
     data = response.json()
 
     if "error" in data:
         raise RuntimeError(
-            data["error"].get("message", str(data["error"]))
+            str(data["error"])
         )
 
     return data
@@ -127,20 +173,27 @@ def arcgis_request(url, params=None):
 # ============================================================
 
 def esri_geometry_to_shape(geometry):
+
     if not geometry:
         return None
 
-    # Polygons
+    # --------------------------------------------------------
+    # POLYGONS
+    # --------------------------------------------------------
+
     if "rings" in geometry:
+
         rings = geometry.get("rings", [])
 
         polygons = []
 
         for ring in rings:
+
             if len(ring) < 4:
                 continue
 
             try:
+
                 polygon = Polygon(ring)
 
                 if not polygon.is_valid:
@@ -150,7 +203,7 @@ def esri_geometry_to_shape(geometry):
                     polygons.append(polygon)
 
             except Exception:
-                continue
+                pass
 
         if not polygons:
             return None
@@ -160,23 +213,30 @@ def esri_geometry_to_shape(geometry):
 
         return unary_union(polygons)
 
-    # Lines
+    # --------------------------------------------------------
+    # LINES
+    # --------------------------------------------------------
+
     if "paths" in geometry:
+
         paths = geometry.get("paths", [])
+
         lines = []
 
         for path in paths:
+
             if len(path) < 2:
                 continue
 
             try:
+
                 line = LineString(path)
 
                 if not line.is_empty:
                     lines.append(line)
 
             except Exception:
-                continue
+                pass
 
         if not lines:
             return None
@@ -186,8 +246,12 @@ def esri_geometry_to_shape(geometry):
 
         return MultiLineString(lines)
 
-    # Points
+    # --------------------------------------------------------
+    # POINTS
+    # --------------------------------------------------------
+
     if "x" in geometry and "y" in geometry:
+
         return Point(
             geometry["x"],
             geometry["y"]
@@ -197,247 +261,274 @@ def esri_geometry_to_shape(geometry):
 
 
 # ============================================================
-# GET ARCGIS FEATURES
+# GET ARC GIS FEATURES
 # ============================================================
 
-def get_features(layer_url, geometry=None, where="1=1"):
-    """
-    Retrieve ArcGIS features using object IDs in batches.
-    Returned geometries use EPSG:27700.
-    """
+def get_features(
+    layer_url,
+    where="1=1",
+    geometry=None
+):
 
-    id_params = {
-        "where": where,
-        "returnIdsOnly": "true",
-        "returnGeometry": "false",
-    }
-
-    if geometry is not None:
-        xmin, ymin, xmax, ymax = geometry
-
-        id_params.update({
-            "geometry": f"{xmin},{ymin},{xmax},{ymax}",
-            "geometryType": "esriGeometryEnvelope",
-            "inSR": "27700",
-            "spatialRel": "esriSpatialRelIntersects",
-        })
-
-    id_result = arcgis_request(
-        layer_url + "/query",
-        id_params
+    first = arcgis_request(
+        layer_url,
+        where=where,
+        geometry=geometry
     )
 
-    object_ids = id_result.get("objectIds") or []
+    features = first.get(
+        "features",
+        []
+    )
 
-    if not object_ids:
-        return []
+    exceeded = first.get(
+        "exceededTransferLimit",
+        False
+    )
 
-    all_features = []
-    batch_size = 200
+    offset = len(features)
 
-    for start in range(0, len(object_ids), batch_size):
-        batch = object_ids[start:start + batch_size]
+    while exceeded:
 
-        result = arcgis_request(
-            layer_url + "/query",
-            {
-                "objectIds": ",".join(
-                    str(object_id) for object_id in batch
-                ),
-                "outFields": "*",
-                "returnGeometry": "true",
-                "outSR": "27700",
-            }
+        next_data = arcgis_request(
+            layer_url,
+            where=where,
+            geometry=geometry,
+            result_offset=offset
         )
 
-        all_features.extend(
-            result.get("features", [])
+        next_features = next_data.get(
+            "features",
+            []
         )
 
-    records = []
+        features.extend(
+            next_features
+        )
 
-    for feature in all_features:
+        if not next_data.get(
+            "exceededTransferLimit",
+            False
+        ):
+            break
+
+        offset += len(next_features)
+
+        if not next_features:
+            break
+
+    result = []
+
+    for feature in features:
+
         attributes = feature.get(
-            "attributes", {}
+            "attributes",
+            {}
         ).copy()
 
-        attributes["geometry"] = esri_geometry_to_shape(
-            feature.get("geometry")
+        attributes["geometry"] = (
+            esri_geometry_to_shape(
+                feature.get("geometry")
+            )
         )
 
-        records.append(attributes)
+        result.append(
+            attributes
+        )
 
-    return records
-
-
-# ============================================================
-# GEOMETRY CLEANING
-# ============================================================
-
-def clean_geometry(geometry):
-    if geometry is None or geometry.is_empty:
-        return None
-
-    try:
-        if not geometry.is_valid:
-            geometry = geometry.buffer(0)
-
-        if geometry.is_empty:
-            return None
-
-        return geometry
-
-    except Exception:
-        return None
+    return result
 
 
 # ============================================================
 # OFFICIAL LADYWOOD BOUNDARY
 # ============================================================
 
-def get_ladywood_boundary():
-    """
-    Retrieve the official ward layer and identify Ladywood using
-    the WARDNME field. If the field name differs, check the returned
-    attributes instead of silently substituting another boundary.
-    """
+ladywood_rows = []
 
-    rows = get_features(WARD_LAYER)
+try:
 
-    if not rows:
-        raise RuntimeError(
-            "The Birmingham Council ward service returned no features."
-        )
+    ladywood_rows = get_features(
+        WARD_LAYER,
+        where="WARDNME = 'Ladywood'"
+    )
 
-    name_fields = [
-        "WARDNME",
-        "WARDNAME",
-        "WARD_NAME",
-        "NAME",
-    ]
-
+except Exception:
     ladywood_rows = []
 
-    for row in rows:
-        for field in name_fields:
-            value = row.get(field)
 
-            if (
-                value is not None
-                and str(value).strip().casefold() == "ladywood"
-            ):
-                ladywood_rows.append(row)
+# Fallback: download wards and find Ladywood locally.
+if not ladywood_rows:
+
+    try:
+
+        all_wards = get_features(
+            WARD_LAYER
+        )
+
+        for row in all_wards:
+
+            ward_name = str(
+                row.get(
+                    "WARDNME",
+                    ""
+                )
+            ).strip().lower()
+
+            if ward_name == "ladywood":
+
+                ladywood_rows = [
+                    row
+                ]
+
                 break
 
-    if not ladywood_rows:
-        available_fields = sorted({
-            key
-            for row in rows
-            for key in row.keys()
-            if key != "geometry"
-        })
+    except Exception:
+        ladywood_rows = []
 
-        raise RuntimeError(
-            "Ward features were returned, but Ladywood could not "
-            "be identified. Available fields: "
-            + ", ".join(available_fields)
-        )
 
-    geometries = []
+if not ladywood_rows:
 
-    for row in ladywood_rows:
-        geom = clean_geometry(row.get("geometry"))
+    st.error(
+        "The official Ladywood ward boundary could not be retrieved."
+    )
 
-        if geom is not None:
-            geometries.append(geom)
+    st.stop()
 
-    if not geometries:
-        raise RuntimeError(
-            "Ladywood was identified, but its boundary geometry "
-            "was empty."
-        )
 
-    return unary_union(geometries)
+ladywood_geometry = (
+    ladywood_rows[0]
+    .get("geometry")
+)
+
+
+if (
+    ladywood_geometry is None
+    or ladywood_geometry.is_empty
+):
+
+    st.error(
+        "The official Ladywood ward was found, "
+        "but its geometry was empty."
+    )
+
+    st.stop()
+
+
+ladywood_geometry = (
+    ladywood_geometry
+    .buffer(0)
+)
 
 
 # ============================================================
-# LOAD LADYWOOD
+# LADYWOOD EXTENT
 # ============================================================
 
-with st.spinner("Loading the official Ladywood boundary..."):
-    try:
-        ladywood_geometry = get_ladywood_boundary()
-    except Exception as error:
-        st.error(
-            "The Ladywood boundary could not be loaded: "
-            + str(error)
-        )
-        st.stop()
-
-
-ladywood_bbox = ladywood_geometry.bounds
+ladywood_bbox = (
+    *ladywood_geometry.bounds,
+)
 
 
 # ============================================================
 # OFFICIAL LSOAs
 # ============================================================
 
-with st.spinner("Loading LSOA areas..."):
-    try:
-        lsoa_rows = get_features(
-            LSOA_LAYER,
-            geometry=ladywood_bbox
-        )
-    except Exception as error:
-        st.error(
-            "The official LSOA dataset could not be loaded: "
-            + str(error)
-        )
-        st.stop()
+try:
+
+    lsoa_rows = get_features(
+        LSOA_LAYER,
+        geometry=ladywood_bbox
+    )
+
+except Exception as error:
+
+    st.error(
+        "The official LSOA dataset could not be loaded."
+    )
+
+    st.caption(str(error))
+
+    st.stop()
 
 
 lsoa_records = []
 
+
 for row in lsoa_rows:
-    geom = clean_geometry(row.get("geometry"))
+
+    geom = row.get(
+        "geometry"
+    )
 
     if geom is None:
         continue
 
-    if not geom.intersects(ladywood_geometry):
+    if geom.is_empty:
         continue
 
-    clipped = clean_geometry(
-        geom.intersection(ladywood_geometry)
+    # Only keep the portion inside Ladywood.
+    clipped = geom.intersection(
+        ladywood_geometry
     )
 
-    if clipped is None or clipped.area <= 0:
+    if clipped.is_empty:
         continue
 
-    lsoa_records.append({
-        "LSOA21CD": row.get("LSOA21CD"),
-        "LSOA21NM": row.get("LSOA21NM"),
-        "MEAN": row.get("MEAN"),
-        "MIN": row.get("MIN"),
-        "MAX": row.get("MAX"),
-        "MEDIAN": row.get("MEDIAN"),
-        "AVERAGE_RISK": row.get("AVERAGE_RISK"),
-        "MINIMUM_RISK": row.get("MINIMUM_RISK"),
-        "MAXIMUM_RISK": row.get("MAXIMUM_RISK"),
-        "geometry": clipped,
-        "Area_m2": clipped.area,
-    })
+    area = clipped.area
+
+    if area <= 0:
+        continue
+
+    lsoa_records.append(
+        {
+            "LSOA21CD": row.get(
+                "LSOA21CD"
+            ),
+            "LSOA21NM": row.get(
+                "LSOA21NM"
+            ),
+            "MEAN": row.get(
+                "MEAN"
+            ),
+            "MIN": row.get(
+                "MIN"
+            ),
+            "MAX": row.get(
+                "MAX"
+            ),
+            "MEDIAN": row.get(
+                "MEDIAN"
+            ),
+            "AVERAGE_RISK": row.get(
+                "AVERAGE_RISK"
+            ),
+            "MINIMUM_RISK": row.get(
+                "MINIMUM_RISK"
+            ),
+            "MAXIMUM_RISK": row.get(
+                "MAXIMUM_RISK"
+            ),
+            "geometry": clipped,
+            "Area_m2": area
+        }
+    )
 
 
-lsoa_df = pd.DataFrame(lsoa_records)
+lsoa_df = pd.DataFrame(
+    lsoa_records
+)
+
 
 if lsoa_df.empty:
+
     st.error(
-        "No LSOA polygons intersecting Ladywood were returned."
+        "No official LSOA areas intersecting Ladywood were found."
     )
+
     st.stop()
 
 
+# Convert official MEAN to numeric.
 lsoa_df["CRVA_MEAN"] = pd.to_numeric(
     lsoa_df["MEAN"],
     errors="coerce"
@@ -445,116 +536,139 @@ lsoa_df["CRVA_MEAN"] = pd.to_numeric(
 
 
 # ============================================================
-# ENVIRONMENTAL SPATIAL LAYERS
+# SPATIAL DATA LOADER
 # ============================================================
 
-def load_spatial_layer(layer_url, layer_name):
-    """
-    Retrieve a council layer and retain only geometries
-    intersecting Ladywood. Query failures are reported separately.
-    """
+def load_spatial_layer(
+    layer_url
+):
 
     try:
+
         rows = get_features(
             layer_url,
             geometry=ladywood_bbox
         )
-    except Exception as error:
-        st.warning(
-            f"{layer_name} could not be retrieved: {error}"
-        )
+
+    except Exception:
+
         return []
 
     features = []
 
     for row in rows:
-        geom = clean_geometry(row.get("geometry"))
+
+        geom = row.get(
+            "geometry"
+        )
 
         if geom is None:
             continue
 
-        if not geom.intersects(ladywood_geometry):
+        if geom.is_empty:
             continue
 
-        clipped = clean_geometry(
-            geom.intersection(ladywood_geometry)
+        # Only retain features actually intersecting Ladywood.
+        if not geom.intersects(
+            ladywood_geometry
+        ):
+            continue
+
+        clipped = geom.intersection(
+            ladywood_geometry
         )
 
-        if clipped is None:
+        if clipped.is_empty:
             continue
 
-        features.append({
-            "attributes": row,
-            "geometry": clipped,
-        })
+        features.append(
+            {
+                "attributes": row,
+                "geometry": clipped
+            }
+        )
 
     return features
 
 
-# Flood Zone 3 - restored as a separate layer
-flood_zone_3_features = load_spatial_layer(
-    FLOOD_ZONE_3_LAYER,
-    "Flood Zone 3"
+# ============================================================
+# LOAD ENVIRONMENTAL DATA
+# ============================================================
+
+flood3_features = load_spatial_layer(
+    FLOOD_ZONE_3_LAYER
 )
 
 surface_features = load_spatial_layer(
-    SURFACE_FLOOD_LAYER,
-    "Surface-water flooding"
+    SURFACE_FLOOD_LAYER
 )
 
 brownfield_features = load_spatial_layer(
-    BROWNFIELD_LAYER,
-    "Brownfield register"
+    BROWNFIELD_LAYER
 )
 
 road_features = load_spatial_layer(
-    ROAD_LAYER,
-    "Classified roads"
+    ROAD_LAYER
 )
 
 
 # ============================================================
-# SURFACE-WATER FLOOD EXPOSURE
+# EXPOSURE CALCULATION
 # ============================================================
 
-def exposure_percent(lsoa_geometry, features):
-    """
-    Percentage of an LSOA polygon intersecting the supplied
-    environmental extent. Returns None if the layer is unavailable.
-    """
+def exposure_percent(
+    lsoa_geometry,
+    features
+):
 
     if not features:
-        return None
+        return 0.0
 
     intersections = []
 
     for feature in features:
-        geom = feature.get("geometry")
+
+        geom = feature.get(
+            "geometry"
+        )
 
         if geom is None:
             continue
 
-        if not geom.intersects(lsoa_geometry):
+        if not geom.intersects(
+            lsoa_geometry
+        ):
             continue
 
-        intersection = clean_geometry(
-            geom.intersection(lsoa_geometry)
+        intersection = geom.intersection(
+            lsoa_geometry
         )
 
-        if intersection is not None:
-            intersections.append(intersection)
+        if not intersection.is_empty:
+
+            intersections.append(
+                intersection
+            )
 
     if not intersections:
         return 0.0
 
-    combined = unary_union(intersections)
-    total_area = lsoa_geometry.area
+    combined = unary_union(
+        intersections
+    )
+
+    exposed_area = combined.area
+
+    total_area = (
+        lsoa_geometry.area
+    )
 
     if total_area <= 0:
-        return None
+        return 0.0
 
     return (
-        combined.area / total_area
+        exposed_area /
+        total_area
     ) * 100
 
 
@@ -564,8 +678,15 @@ def exposure_percent(lsoa_geometry, features):
 
 results = []
 
+
 for _, row in lsoa_df.iterrows():
+
     geom = row["geometry"]
+
+    flood_zone_3 = exposure_percent(
+        geom,
+        flood3_features
+    )
 
     surface_flood = exposure_percent(
         geom,
@@ -577,94 +698,118 @@ for _, row in lsoa_df.iterrows():
         brownfield_features
     )
 
-    results.append({
-        "LSOA21CD": row["LSOA21CD"],
-        "LSOA21NM": row["LSOA21NM"],
-        "Area_m2": row["Area_m2"],
-        "CRVA_MEAN": row["CRVA_MEAN"],
-        "CRVA_AVERAGE_RISK": row["AVERAGE_RISK"],
-        "Surface_Flood_%": surface_flood,
-        "Brownfield_Exposure_%": brownfield,
-        "geometry": geom,
-    })
+    # Avoid double-counting overlapping flood layers.
+    combined_flood = max(
+        flood_zone_3,
+        surface_flood
+    )
+
+    results.append(
+        {
+            "LSOA21CD":
+                row["LSOA21CD"],
+
+            "LSOA21NM":
+                row["LSOA21NM"],
+
+            "Area_m2":
+                row["Area_m2"],
+
+            "CRVA_MEAN":
+                row["CRVA_MEAN"],
+
+            "CRVA_AVERAGE_RISK":
+                row["AVERAGE_RISK"],
+
+            "Flood_Zone_3_%":
+                flood_zone_3,
+
+            "Surface_Flood_%":
+                surface_flood,
+
+            "Combined_Flood_Exposure_%":
+                combined_flood,
+
+            "Brownfield_Exposure_%":
+                brownfield,
+
+            "geometry":
+                geom
+        }
+    )
 
 
-risk_df = pd.DataFrame(results)
+risk_df = pd.DataFrame(
+    results
+)
 
 
 # ============================================================
-# NORMALISE INDICATORS
+# NORMALISATION
 # ============================================================
 
 def normalise(series):
-    numeric = pd.to_numeric(series, errors="coerce")
 
-    if numeric.notna().sum() == 0:
-        return pd.Series(
-            float("nan"),
-            index=series.index
-        )
+    numeric = pd.to_numeric(
+        series,
+        errors="coerce"
+    )
 
     minimum = numeric.min()
     maximum = numeric.max()
 
-    if pd.isna(minimum) or pd.isna(maximum):
+    if (
+        pd.isna(minimum)
+        or pd.isna(maximum)
+        or maximum == minimum
+    ):
+
         return pd.Series(
-            float("nan"),
+            [0.0] * len(series),
             index=series.index
         )
 
-    if maximum == minimum:
-        return pd.Series(
-            0.0,
-            index=series.index
-        )
-
-    return (numeric - minimum) / (maximum - minimum)
+    return (
+        numeric - minimum
+    ) / (
+        maximum - minimum
+    )
 
 
 risk_df["Climate_Index"] = normalise(
     risk_df["CRVA_MEAN"]
 )
 
-risk_df["Surface_Flood_Index"] = normalise(
-    risk_df["Surface_Flood_%"]
+risk_df["Flood_Index"] = normalise(
+    risk_df[
+        "Combined_Flood_Exposure_%"
+    ]
 )
 
 risk_df["Brownfield_Index"] = normalise(
-    risk_df["Brownfield_Exposure_%"]
+    risk_df[
+        "Brownfield_Exposure_%"
+    ]
 )
 
 
 # ============================================================
-# ENVIRONMENTAL SCREENING INDEX
+# ENVIRONMENTAL ASSESSMENT INDEX CALCULATION
 # ============================================================
-
-# Equal weighting is a project-defined comparison method.
-# It is NOT an official Birmingham Council risk formula.
-#
-# Missing indicators are not silently replaced with zero.
-
-index_columns = [
-    "Climate_Index",
-    "Surface_Flood_Index",
-    "Brownfield_Index",
-]
-
-risk_df["Indicators_Available"] = (
-    risk_df[index_columns].notna().sum(axis=1)
-)
 
 risk_df["Environmental_Index"] = (
-    risk_df[index_columns].mean(axis=1, skipna=True)
-)
+    risk_df["Climate_Index"] +
+    risk_df["Flood_Index"] +
+    risk_df["Brownfield_Index"]
+) / 3
 
 
 # ============================================================
-# PROJECT-DEFINED SCREENING CLASS
+# RISK CLASSIFICATION
 # ============================================================
 
 def classify_risk(value):
+
     if pd.isna(value):
         return "NOT AVAILABLE"
 
@@ -678,19 +823,28 @@ def classify_risk(value):
 
 
 risk_df["Risk_Class"] = (
-    risk_df["Environmental_Index"].apply(classify_risk)
+    risk_df[
+        "Environmental_Index"
+    ]
+    .apply(classify_risk)
 )
 
 
 # ============================================================
-# DOMINANT ENVIRONMENTAL DRIVER
+# DOMINANT DRIVER
 # ============================================================
 
 def dominant_driver(row):
+
     values = {
-        "CRVA vulnerability": row["Climate_Index"],
-        "Surface-water flood exposure": row["Surface_Flood_Index"],
-        "Brownfield exposure": row["Brownfield_Index"],
+        "Climate vulnerability":
+            row["Climate_Index"],
+
+        "Flood exposure":
+            row["Flood_Index"],
+
+        "Brownfield exposure":
+            row["Brownfield_Index"]
     }
 
     valid = {
@@ -702,82 +856,139 @@ def dominant_driver(row):
     if not valid:
         return "Not available"
 
-    return max(valid, key=valid.get)
+    return max(
+        valid,
+        key=valid.get
+    )
 
 
-risk_df["Dominant_Environmental_Driver"] = risk_df.apply(
+risk_df[
+    "Dominant_Environmental_Driver"
+] = risk_df.apply(
     dominant_driver,
     axis=1
 )
 
 
+
 # ============================================================
-# CLASSIFIED ROAD PROXIMITY
+# ROAD PROXIMITY
 # ============================================================
 
-def nearest_road_info(lsoa_geometry, roads):
+def nearest_road_info(
+    lsoa_geometry,
+    roads
+):
+
     if not roads:
-        return None, "No classified road data"
+        return (
+            None,
+            "No classified road data"
+        )
 
     nearest_distance = None
     nearest_class = None
 
     for road in roads:
-        geom = road.get("geometry")
+
+        geom = road.get(
+            "geometry"
+        )
 
         if geom is None:
             continue
 
-        distance = lsoa_geometry.distance(geom)
+        distance = (
+            lsoa_geometry
+            .distance(geom)
+        )
 
-        attributes = road.get("attributes", {})
+        attributes = road.get(
+            "attributes",
+            {}
+        )
 
-        road_class = attributes.get("BRUM_CLASS")
+        road_class = attributes.get(
+            "BRUM_CLASS"
+        )
 
         if (
             nearest_distance is None
             or distance < nearest_distance
         ):
+
             nearest_distance = distance
             nearest_class = road_class
 
-    return nearest_distance, nearest_class
+    return (
+        nearest_distance,
+        nearest_class
+    )
 
 
-road_info = [
-    nearest_road_info(row["geometry"], road_features)
-    for _, row in risk_df.iterrows()
+road_distances = []
+
+
+for _, row in risk_df.iterrows():
+
+    distance, road_class = (
+        nearest_road_info(
+            row["geometry"],
+            road_features
+        )
+    )
+
+    road_distances.append(
+        {
+            "Distance_m": distance,
+            "Road_Class": road_class
+        }
+    )
+
+
+risk_df[
+    "Nearest_Classified_Road_m"
+] = [
+    item["Distance_m"]
+    for item in road_distances
 ]
 
-risk_df["Nearest_Classified_Road_m"] = [
-    item[0] for item in road_info
+risk_df[
+    "Nearest_Road_Class"
+] = [
+    item["Road_Class"]
+    for item in road_distances
 ]
 
-risk_df["Nearest_Road_Class"] = [
-    item[1] for item in road_info
-]
 
 
 # ============================================================
 # MAP
 # ============================================================
 
-ladywood_center = transform(
-    to_wgs84,
+ladywood_center = (
     ladywood_geometry.centroid
 )
 
-m = folium.Map(
-    location=[ladywood_center.y, ladywood_center.x],
-    zoom_start=14,
-    control_scale=True,
-    tiles="CartoDB positron"
+center_wgs = transform(
+    to_wgs84,
+    ladywood_center
 )
 
 
-# ------------------------------------------------------------
+m = folium.Map(
+    location=[
+        center_wgs.y,
+        center_wgs.x
+    ],
+    zoom_start=14,
+    control_scale=True
+)
+
+
+# ============================================================
 # MAP LEGEND
-# ------------------------------------------------------------
+# ============================================================
 
 legend_html = """
 <div style="
@@ -785,13 +996,13 @@ position: fixed;
 bottom: 30px;
 left: 30px;
 z-index: 9999;
-background: white;
+background-color: white;
 padding: 12px;
 border: 1px solid #777;
 font-size: 13px;
 box-shadow: 0 1px 5px rgba(0,0,0,0.3);
 ">
-<b>Project screening class</b><br>
+<b>Environmental Screening</b><br>
 <span style="color:green;">●</span> Low<br>
 <span style="color:orange;">●</span> Moderate<br>
 <span style="color:red;">●</span> High<br>
@@ -800,13 +1011,15 @@ box-shadow: 0 1px 5px rgba(0,0,0,0.3);
 """
 
 m.get_root().html.add_child(
-    folium.Element(legend_html)
+    folium.Element(
+        legend_html
+    )
 )
 
 
-# ------------------------------------------------------------
-# LADYWOOD BOUNDARY
-# ------------------------------------------------------------
+# ============================================================
+# OFFICIAL LADYWOOD BOUNDARY
+# ============================================================
 
 ladywood_wgs = transform(
     to_wgs84,
@@ -814,22 +1027,48 @@ ladywood_wgs = transform(
 )
 
 folium.GeoJson(
-    mapping(ladywood_wgs),
-    name="Official Ladywood Boundary",
+    {
+        "type": "Feature",
+        "geometry": {
+            "type": (
+                "MultiPolygon"
+                if isinstance(
+                    ladywood_wgs,
+                    MultiPolygon
+                )
+                else "Polygon"
+            ),
+            "coordinates":
+                __import__(
+                    "shapely"
+                ).geometry.mapping(
+                    ladywood_wgs
+                )["coordinates"]
+        },
+        "properties": {}
+    },
+    name="Ladywood Boundary",
     style_function=lambda feature: {
         "color": "black",
         "weight": 3,
-        "fillOpacity": 0,
+        "fillOpacity": 0
     },
-    tooltip="Ladywood Ward Boundary",
+    tooltip="Official Ladywood Ward Boundary"
 ).add_to(m)
 
 
-# ------------------------------------------------------------
-# RISK COLOURS
-# ------------------------------------------------------------
+# ============================================================
+# LSOA RISK MAP
+# ============================================================
+
+lsoa_group = folium.FeatureGroup(
+    name="Ladywood LSOA Risk",
+    show=True
+)
+
 
 def risk_colour(value):
+
     if value == "HIGH":
         return "red"
 
@@ -842,84 +1081,220 @@ def risk_colour(value):
     return "gray"
 
 
-# ------------------------------------------------------------
-# LSOA SCREENING MAP
-# ------------------------------------------------------------
-
-lsoa_group = folium.FeatureGroup(
-    name="LSOA Environmental Screening",
-    show=True
-)
-
 for _, row in risk_df.iterrows():
+
     geom_wgs = transform(
         to_wgs84,
         row["geometry"]
     )
 
     risk = row["Risk_Class"]
-    colour = risk_colour(risk)
 
-    index_value = row["Environmental_Index"]
-
-    index_text = (
-        f"{index_value:.2f}"
-        if pd.notna(index_value)
-        else "Not available"
-    )
-
-    surface_value = row["Surface_Flood_%"]
-    surface_text = (
-        f"{surface_value:.1f}%"
-        if pd.notna(surface_value)
-        else "Unavailable"
-    )
-
-    brownfield_value = row["Brownfield_Exposure_%"]
-    brownfield_text = (
-        f"{brownfield_value:.1f}%"
-        if pd.notna(brownfield_value)
-        else "Unavailable"
+    colour = risk_colour(
+        risk
     )
 
     popup = f"""
     <b>{row['LSOA21NM']}</b><br>
-    LSOA code: {row['LSOA21CD']}<br>
-    Project screening class: {risk}<br>
-    Environmental index: {index_text}<br>
-    CRVA MEAN: {row['CRVA_MEAN']}<br>
-    Surface-water flood exposure: {surface_text}<br>
-    Brownfield exposure: {brownfield_text}<br>
-    Available indicators: {row['Indicators_Available']} of 3<br>
-    Dominant indicator: {row['Dominant_Environmental_Driver']}
+    LSOA: {row['LSOA21CD']}<br>
+    Screening class: {risk}<br>
+    Environmental index:
+    {row['Environmental_Index']:.2f}<br>
+    Climate vulnerability:
+    {row['Climate_Index']:.2f}<br>
+    Flood exposure:
+    {row['Combined_Flood_Exposure_%']:.1f}%<br>
+    Brownfield exposure:
+    {row['Brownfield_Exposure_%']:.1f}%<br>
+    Dominant driver:
+    {row['Dominant_Environmental_Driver']}<br>
+    Nearest classified road:
+    {
+        f"{row['Nearest_Classified_Road_m']:.0f} m"
+        if pd.notna(
+            row["Nearest_Classified_Road_m"]
+        )
+        else "Not available"
+    }
     """
 
     folium.GeoJson(
-        mapping(geom_wgs),
-        style_function=lambda feature, c=colour: {
-            "color": c,
-            "weight": 2,
-            "fillColor": c,
-            "fillOpacity": 0.25,
+        {
+            "type": "Feature",
+            "geometry":
+                __import__(
+                    "shapely"
+                ).geometry.mapping(
+                    geom_wgs
+                ),
+            "properties": {}
         },
-        popup=folium.Popup(popup, max_width=400),
-        tooltip=str(row["LSOA21NM"]),
-    ).add_to(lsoa_group)
+        style_function=lambda feature,
+        colour=colour: {
+            "color": colour,
+            "weight": 2,
+            "fillColor": colour,
+            "fillOpacity": 0.25
+        },
+        popup=folium.Popup(
+            popup,
+            max_width=400
+        )
+    ).add_to(
+        lsoa_group
+    )
+
 
 lsoa_group.add_to(m)
 
 
-# ------------------------------------------------------------
-# FLOOD ZONE 3 MAP SWITCH
-# ------------------------------------------------------------
+# ============================================================
+# FLOOD ZONE 3
+# ============================================================
 
-flood_zone_3_group = folium.FeatureGroup(
-    name="Flood Zone 3 - High Probability",
+flood_group = folium.FeatureGroup(
+    name="Flood Zone 3",
     show=False
 )
 
-for feature in flood_zone_3_features:
-    geom = feature.get("geometry")
+for feature in flood3_features:
+
+    geom_wgs = transform(
+        to_wgs84,
+        feature["geometry"]
+    )
+
+    folium.GeoJson(
+        {
+            "type": "Feature",
+            "geometry":
+                __import__(
+                    "shapely"
+                ).geometry.mapping(
+                    geom_wgs
+                ),
+            "properties": {}
+        },
+        style_function=lambda feature: {
+            "color": "blue",
+            "weight": 1,
+            "fillColor": "blue",
+            "fillOpacity": 0.25
+        },
+        tooltip="Flood Zone 3"
+    ).add_to(
+        flood_group
+    )
+
+flood_group.add_to(m)
+
+
+# ============================================================
+# SURFACE FLOODING
+# ============================================================
+
+surface_group = folium.FeatureGroup(
+    name="Surface Flooding",
+    show=False
+)
+
+for feature in surface_features:
+
+    geom_wgs = transform(
+        to_wgs84,
+        feature["geometry"]
+    )
+
+    folium.GeoJson(
+        {
+            "type": "Feature",
+            "geometry":
+                __import__(
+                    "shapely"
+                ).geometry.mapping(
+                    geom_wgs
+                ),
+            "properties": {}
+        },
+        style_function=lambda feature: {
+            "color": "purple",
+            "weight": 1,
+            "fillColor": "purple",
+            "fillOpacity": 0.20
+        },
+        tooltip="Surface Flooding"
+    ).add_to(
+        surface_group
+    )
+
+surface_group.add_to(m)
+
+
+# ============================================================
+# BROWNFIELD
+# ============================================================
+
+brownfield_group = folium.FeatureGroup(
+    name="Brownfield Register 2025",
+    show=False
+)
+
+for feature in brownfield_features:
+
+    geom_wgs = transform(
+        to_wgs84,
+        feature["geometry"]
+    )
+
+    folium.GeoJson(
+        {
+            "type": "Feature",
+            "geometry":
+                __import__(
+                    "shapely"
+                ).geometry.mapping(
+                    geom_wgs
+                ),
+            "properties": {}
+        },
+        style_function=lambda feature: {
+            "color": "brown",
+            "weight": 2,
+            "fillColor": "brown",
+            "fillOpacity": 0.25
+        },
+        tooltip="Brownfield Register 2025"
+    ).add_to(
+        brownfield_group
+    )
+
+brownfield_group.add_to(m)
+
+
+# ============================================================
+# CLASSIFIED ROADS
+# ============================================================
+
+road_group = folium.FeatureGroup(
+    name="Classified Roads",
+    show=False
+)
+
+
+def road_colour(road_class):
+
+    if road_class == "A Road":
+        return "red"
+
+    if road_class == "B Road":
+        return "blue"
+
+    return "gold"
+
+
+for feature in road_features:
+
+    geom = feature["geometry"]
 
     if geom is None:
         continue
@@ -929,185 +1304,120 @@ for feature in flood_zone_3_features:
         geom
     )
 
-    folium.GeoJson(
-        mapping(geom_wgs),
-        style_function=lambda feature: {
-            "color": "blue",
-            "weight": 2,
-            "fillColor": "blue",
-            "fillOpacity": 0.35,
-        },
-        tooltip="Flood Zone 3 - High Probability",
-    ).add_to(flood_zone_3_group)
+    road_class = (
+        feature["attributes"]
+        .get(
+            "BRUM_CLASS",
+            "Classified Road"
+        )
+    )
 
-flood_zone_3_group.add_to(m)
-
-
-# ------------------------------------------------------------
-# SURFACE-WATER FLOODING MAP SWITCH
-# ------------------------------------------------------------
-
-surface_group = folium.FeatureGroup(
-    name="Surface-Water Flooding",
-    show=False
-)
-
-for feature in surface_features:
-    geom_wgs = transform(
-        to_wgs84,
-        feature["geometry"]
+    road_name = (
+        feature["attributes"]
+        .get(
+            "BRUM_ROAD_",
+            ""
+        )
     )
 
     folium.GeoJson(
-        mapping(geom_wgs),
-        name="Surface-Water Flooding",
-        style_function=lambda feature: {
-            "color": "purple",
-            "weight": 1,
-            "fillColor": "purple",
-            "fillOpacity": 0.25,
+        {
+            "type": "Feature",
+            "geometry":
+                __import__(
+                    "shapely"
+                ).geometry.mapping(
+                    geom_wgs
+                ),
+            "properties": {}
         },
-        tooltip="Surface-Water Flooding",
-    ).add_to(surface_group)
-
-surface_group.add_to(m)
-
-
-# ------------------------------------------------------------
-# BROWNFIELD MAP SWITCH
-# ------------------------------------------------------------
-
-brownfield_group = folium.FeatureGroup(
-    name="Brownfield Register Sites",
-    show=False
-)
-
-for feature in brownfield_features:
-    geom_wgs = transform(
-        to_wgs84,
-        feature["geometry"]
+        style_function=lambda feature,
+        road_class=road_class: {
+            "color":
+                road_colour(
+                    road_class
+                ),
+            "weight": 3
+        },
+        tooltip=(
+            f"{road_class}"
+            + (
+                f" — {road_name}"
+                if road_name
+                else ""
+            )
+        )
+    ).add_to(
+        road_group
     )
 
-    folium.GeoJson(
-        mapping(geom_wgs),
-        style_function=lambda feature: {
-            "color": "brown",
-            "weight": 2,
-            "fillColor": "brown",
-            "fillOpacity": 0.25,
-        },
-        tooltip="Brownfield Register Site",
-    ).add_to(brownfield_group)
-
-brownfield_group.add_to(m)
-
-
-# ------------------------------------------------------------
-# CLASSIFIED ROADS MAP SWITCH
-# ------------------------------------------------------------
-
-road_group = folium.FeatureGroup(
-    name="Classified Roads",
-    show=False
-)
-
-
-def road_colour(road_class):
-    text = str(road_class).strip().upper()
-
-    if text.startswith("A"):
-        return "red"
-
-    if text.startswith("B"):
-        return "blue"
-
-    return "gold"
-
-
-for feature in road_features:
-    geom = feature.get("geometry")
-
-    if geom is None:
-        continue
-
-    geom_wgs = transform(to_wgs84, geom)
-
-    attributes = feature.get("attributes", {})
-    road_class = attributes.get(
-        "BRUM_CLASS",
-        "Classified Road"
-    )
-    road_name = attributes.get("BRUM_ROAD_", "")
-
-    tooltip = str(road_class)
-
-    if road_name:
-        tooltip += " — " + str(road_name)
-
-    folium.GeoJson(
-        mapping(geom_wgs),
-        style_function=lambda feature, rc=road_class: {
-            "color": road_colour(rc),
-            "weight": 3,
-        },
-        tooltip=tooltip,
-    ).add_to(road_group)
 
 road_group.add_to(m)
 
 
-# ------------------------------------------------------------
-# LSOA CENTROID RISK MARKERS
-# ------------------------------------------------------------
+# ============================================================
+# RISK DOTS
+# ============================================================
 
 marker_group = folium.FeatureGroup(
-    name="LSOA Screening Markers",
+    name="Risk Markers",
     show=True
 )
 
+
 for _, row in risk_df.iterrows():
-    point = row["geometry"].centroid
+
+    point = (
+        row["geometry"]
+        .centroid
+    )
 
     point_wgs = transform(
         to_wgs84,
         point
     )
 
-    colour = risk_colour(row["Risk_Class"])
+    colour = risk_colour(
+        row["Risk_Class"]
+    )
 
     folium.CircleMarker(
-        location=[point_wgs.y, point_wgs.x],
-        radius=7,
+        location=[
+            point_wgs.y,
+            point_wgs.x
+        ],
+        radius=8,
         color=colour,
         fill=True,
         fill_color=colour,
         fill_opacity=0.9,
         tooltip=(
-            f"{row['LSOA21NM']} — {row['Risk_Class']}"
+            f"{row['LSOA21NM']} — "
+            f"{row['Risk_Class']}"
         ),
         popup=folium.Popup(
             f"""
             <b>{row['LSOA21NM']}</b><br>
             Environmental index:
-            {
-                f"{row['Environmental_Index']:.2f}"
-                if pd.notna(row['Environmental_Index'])
-                else "Not available"
-            }<br>
-            Screening class: {row['Risk_Class']}<br>
-            Dominant indicator:
+            {row['Environmental_Index']:.2f}<br>
+            Risk:
+            {row['Risk_Class']}<br>
+            Main driver:
             {row['Dominant_Environmental_Driver']}
             """,
-            max_width=350,
-        ),
-    ).add_to(marker_group)
+            max_width=350
+        )
+    ).add_to(
+        marker_group
+    )
+
 
 marker_group.add_to(m)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # LAYER CONTROL
-# ------------------------------------------------------------
+# ============================================================
 
 folium.LayerControl(
     collapsed=False
@@ -1115,15 +1425,18 @@ folium.LayerControl(
 
 
 # ============================================================
-# DISPLAY MAP
+# SHOW MAP
 # ============================================================
 
-st.subheader("Ladywood Environmental Map")
+st.subheader(
+    "Ladywood Environmental Map"
+)
 
 st.caption(
-    "Use the map layer control to display or hide Flood Zone 3, "
-    "surface-water flooding, brownfield sites, classified roads "
-    "and LSOA screening."
+    "Use the layer control in the top-right of the map to "
+    "turn environmental layers on and off. The coloured "
+    "markers identify the assessment result for each official "
+    "Ladywood LSOA(Small neighbhourhood)."
 )
 
 st.components.v1.html(
@@ -1134,39 +1447,40 @@ st.components.v1.html(
 
 
 # ============================================================
-# ENVIRONMENTAL ASSESSMENT TABLE
+# ENVIRONMENTAL assessment TABLE
 # ============================================================
 
-st.subheader("Environmental Screening Results")
+st.subheader(
+    "Environmental assessment Classification"
+)
 
 st.caption(
-    "The index is a project-defined comparative screening measure, "
-    "not an official Birmingham Council risk classification."
-)
+    "This table compares the official Ladywood LSOA(small neighbhourhoods) areas "
+    "using climate vulnerability, flood exposure "
+    "and brownfield exposure.") 
+
 
 table_columns = [
     "LSOA21CD",
     "LSOA21NM",
     "CRVA_MEAN",
     "CRVA_AVERAGE_RISK",
-    "Surface_Flood_%",
+    "Combined_Flood_Exposure_%",
     "Brownfield_Exposure_%",
-    "Climate_Index",
-    "Surface_Flood_Index",
-    "Brownfield_Index",
     "Environmental_Index",
-    "Indicators_Available",
     "Risk_Class",
-    "Dominant_Environmental_Driver",
+    "Dominant_Environmental_Driver"
 ]
 
-display_df = risk_df[table_columns].copy()
+display_df = risk_df[
+    table_columns
+].copy()
 
 display_df = display_df.sort_values(
     "Environmental_Index",
-    ascending=False,
-    na_position="last"
+    ascending=False
 )
+
 
 st.dataframe(
     display_df,
@@ -1179,7 +1493,10 @@ st.dataframe(
 # PRIORITY AREAS
 # ============================================================
 
-st.subheader("Areas for Further Investigation")
+st.subheader(
+    "Priority Ladywood Areas for Further Investigation"
+)
+
 
 priority_df = risk_df[
     risk_df["Risk_Class"] == "HIGH"
@@ -1188,20 +1505,49 @@ priority_df = risk_df[
     ascending=False
 )
 
+
 if priority_df.empty:
+
     st.info(
-        "No LSOA reached the HIGH project screening category. "
-        "This does not establish that environmental hazards are absent."
+        "No Ladywood LSOA reached the HIGH assessment "
+        "category using this calculation."
     )
+
+    moderate_df = risk_df[
+        risk_df["Risk_Class"] == "MODERATE"
+    ].sort_values(
+        "Environmental_Index",
+        ascending=False
+    )
+
+    if not moderate_df.empty:
+
+        st.write(
+            "**Highest MODERATE assessment areas:**"
+        )
+
+        st.dataframe(
+            moderate_df[
+                [
+                    "LSOA21CD",
+                    "LSOA21NM",
+                    "Environmental_Index",
+                    "Dominant_Environmental_Driver"
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
 else:
+
     st.dataframe(
         priority_df[
             [
                 "LSOA21CD",
                 "LSOA21NM",
                 "Environmental_Index",
-                "Indicators_Available",
-                "Dominant_Environmental_Driver",
+                "Dominant_Environmental_Driver"
             ]
         ],
         use_container_width=True,
@@ -1210,138 +1556,231 @@ else:
 
 
 # ============================================================
-# CHART 1 — ENVIRONMENTAL SCREENING INDEX
+# CHART 1 — ENVIRONMENTAL RISK
 # ============================================================
 
-st.subheader("Environmental Screening Index by Area")
-
-index_chart = risk_df[
-    ["LSOA21NM", "Environmental_Index"]
-].set_index("LSOA21NM")
-
-st.bar_chart(index_chart)
-
-
-# ============================================================
-# CHART 2 — CRVA INDICATOR
-# ============================================================
-
-st.subheader("CRVA MEAN by Area")
-
-st.caption(
-    "CRVA MEAN is displayed as supplied by the source. The "
-    "normalised Climate Index is a relative comparison between "
-    "the mapped LSOAs, not a separate official standard."
+st.subheader(
+    "Environmental Risk by Ladywood Area"
 )
 
-climate_chart = risk_df[
-    ["LSOA21NM", "CRVA_MEAN"]
-].set_index("LSOA21NM")
-
-st.bar_chart(climate_chart)
-
-
-# ============================================================
-# CHART 3 — SURFACE-WATER FLOOD EXPOSURE
-# ============================================================
-
-st.subheader("Surface-Water Flood Exposure by Area")
-
 st.caption(
-    "Percentage of each LSOA polygon intersecting the retrieved "
-    "surface-water flooding layer. Flood Zone 3 is displayed "
-    "separately on the map."
+    "Higher values indicate higher combined assessment scores "
+    "from climate/environmental vulnerability, flood exposure "
+    "and brownfield exposure."
 )
 
-surface_chart = risk_df[
-    ["LSOA21NM", "Surface_Flood_%"]
-].set_index("LSOA21NM")
-
-st.bar_chart(surface_chart)
-
-
-# ============================================================
-# CHART 4 — BROWNFIELD EXPOSURE
-# ============================================================
-
-st.subheader("Brownfield Register Exposure by Area")
-
-st.caption(
-    "Percentage of each LSOA polygon intersecting mapped "
-    "brownfield register sites. This does not represent all "
-    "potentially degraded land."
-)
-
-brownfield_chart = risk_df[
-    ["LSOA21NM", "Brownfield_Exposure_%"]
-].set_index("LSOA21NM")
-
-st.bar_chart(brownfield_chart)
-
-
-# ============================================================
-# CHART 5 — INDICATOR COMPARISON
-# ============================================================
-
-st.subheader("Comparison of Environmental Indicators")
-
-driver_chart = risk_df[
-    [
-        "LSOA21NM",
-        "Climate_Index",
-        "Surface_Flood_Index",
-        "Brownfield_Index",
+environment_chart = (
+    risk_df[
+        [
+            "LSOA21NM",
+            "Environmental_Index"
+        ]
     ]
-].set_index("LSOA21NM")
+    .set_index(
+        "LSOA21NM"
+    )
+)
 
-st.bar_chart(driver_chart)
+st.bar_chart(
+    environment_chart
+)
 
 
 # ============================================================
-# CLASSIFIED ROADS TABLE
+# CHART 2 — CLIMATE
 # ============================================================
 
-st.subheader("Classified Roads Within Ladywood")
+st.subheader(
+    "Climate Vulnerability by Ladywood Area"
+)
 
 st.caption(
-    "Road proximity is presented as context. No arbitrary "
-    "road-pollution multiplier is applied."
+    "This uses the official numeric MEAN value provided in "
+    "Birmingham's 2025 LSOA environmental-risk dataset and "
+    "normalises it for comparison between Ladywood areas."
 )
+
+climate_chart = (
+    risk_df[
+        [
+            "LSOA21NM",
+            "CRVA_MEAN"
+        ]
+    ]
+    .set_index(
+        "LSOA21NM"
+    )
+)
+
+st.bar_chart(
+    climate_chart
+)
+
+
+# ============================================================
+# CHART 3 — FLOOD
+# ============================================================
+
+st.subheader(
+    "Flood Exposure by Ladywood Area"
+)
+
+st.caption(
+    "Percentage of each official Ladywood LSOA(small neighbhourhood) intersecting "
+    "the combined flood assessment extent."
+)
+
+flood_chart = (
+    risk_df[
+        [
+            "LSOA21NM",
+            "Combined_Flood_Exposure_%"
+        ]
+    ]
+    .set_index(
+        "LSOA21NM"
+    )
+)
+
+st.bar_chart(
+    flood_chart
+)
+
+
+
+# ============================================================
+# CHART 5 — BROWNFIELD
+# ============================================================
+
+st.subheader(
+    "Brownfield Exposure by Ladywood Area"
+)
+
+st.caption(
+    "Percentage of each official Ladywood LSOA intersecting "
+    "the Birmingham Brownfield Register 2025."
+)
+
+brownfield_chart = (
+    risk_df[
+        [
+            "LSOA21NM",
+            "Brownfield_Exposure_%"
+        ]
+    ]
+    .set_index(
+        "LSOA21NM"
+    )
+)
+
+st.bar_chart(
+    brownfield_chart
+)
+
+
+# ============================================================
+# CHART 6 — DRIVER COMPARISON
+# ============================================================
+
+st.subheader(
+    "Environmental Drivers by Ladywood Area"
+)
+
+st.caption(
+    "Normalised indicators allow the different environmental "
+    "factors to be compared on the same 0–1 scale."
+)
+
+driver_chart = (
+    risk_df[
+        [
+            "LSOA21NM",
+            "Climate_Index",
+            "Flood_Index",
+            "Brownfield_Index"
+        ]
+    ]
+    .set_index(
+        "LSOA21NM"
+    )
+)
+
+st.bar_chart(
+    driver_chart
+)
+
+
+
+# ============================================================
+# CLASSIFIED ROADS
+# ============================================================
+
+st.subheader(
+    "Classified Roads Within Ladywood"
+)
+
+st.caption(
+    "Official Birmingham classified-road data are shown here "
+    "as environmental context. Road proximity is reported "
+    "separately rather than being given an arbitrary pollution "
+    "multiplier."
+)
+
 
 road_records = []
 
-for feature in road_features:
-    attributes = feature.get("attributes", {})
 
-    road_records.append({
-        "Road classification": attributes.get("BRUM_CLASS"),
-        "Road": attributes.get("BRUM_ROAD_"),
-    })
+for feature in road_features:
+
+    attributes = feature.get(
+        "attributes",
+        {}
+    )
+
+    road_records.append(
+        {
+            "Road classification":
+                attributes.get(
+                    "BRUM_CLASS"
+                ),
+
+            "Road":
+                attributes.get(
+                    "BRUM_ROAD_"
+                )
+        }
+    )
+
 
 if road_records:
-    roads_df = pd.DataFrame(road_records).drop_duplicates()
 
-    sort_columns = [
-        column for column in
-        ["Road classification", "Road"]
-        if column in roads_df.columns
-    ]
+    roads_df = pd.DataFrame(
+        road_records
+    )
 
-    if sort_columns:
-        roads_df = roads_df.sort_values(
-            sort_columns,
+    roads_df = (
+        roads_df
+        .drop_duplicates()
+        .sort_values(
+            [
+                "Road classification",
+                "Road"
+            ],
             na_position="last"
         )
+    )
 
     st.dataframe(
         roads_df,
         use_container_width=True,
         hide_index=True
     )
+
 else:
+
     st.warning(
-        "No classified-road features were returned. "
-        "This may indicate unavailable data or no returned features."
+        "No classified-road features were returned inside "
+        "the official Ladywood boundary."
     )
 
 
@@ -1349,20 +1788,25 @@ else:
 # ROAD PROXIMITY BY LSOA
 # ============================================================
 
-st.subheader("Classified Road Proximity by Area")
+st.subheader(
+    "Classified Road Proximity by Ladywood Area"
+)
 
 road_proximity_df = risk_df[
     [
         "LSOA21CD",
         "LSOA21NM",
         "Nearest_Classified_Road_m",
-        "Nearest_Road_Class",
+        "Nearest_Road_Class"
     ]
 ].copy()
 
-road_proximity_df = road_proximity_df.sort_values(
-    "Nearest_Classified_Road_m",
-    na_position="last"
+road_proximity_df = (
+    road_proximity_df
+    .sort_values(
+        "Nearest_Classified_Road_m",
+        na_position="last"
+    )
 )
 
 st.dataframe(
@@ -1376,25 +1820,16 @@ st.dataframe(
 # ENGINEERING INTERPRETATION
 # ============================================================
 
-st.subheader("Engineering Interpretation")
-
-st.write(
-    "The dashboard uses mapped environmental indicators to identify "
-    "areas that may warrant further investigation. The outputs support "
-    "screening and prioritisation; they do not replace site inspections, "
-    "environmental sampling, flood assessments or statutory evaluations."
+st.subheader(
+    "Engineering assessment Interpretation"
 )
 
-st.write(
-    "Flood Zone 3 is displayed as a separate map layer. The existing "
-    "surface-water flooding indicator remains separate, so the "
-    "dashboard does not combine the two flood datasets in its index."
-)
-
-st.write(
-    "The equal-weight index and the HIGH/MODERATE/LOW thresholds are "
-    "project-defined comparison rules. They must not be described as "
-    "official Birmingham Council risk thresholds."
+st.caption(
+    "The dashboard applies a source → pathway → receptor "
+    "assessment approach. Environmental indicators identify "
+    "where further engineering investigation may be useful; "
+    "they do not replace site investigation or statutory "
+    "environmental assessment."
 )
 
 
@@ -1409,23 +1844,31 @@ download_columns = [
     "CRVA_MEAN",
     "CRVA_AVERAGE_RISK",
     "Climate_Index",
+    "Flood_Zone_3_%",
     "Surface_Flood_%",
-    "Surface_Flood_Index",
+    "Combined_Flood_Exposure_%",
+    "Flood_Index",
     "Brownfield_Exposure_%",
     "Brownfield_Index",
     "Environmental_Index",
-    "Indicators_Available",
     "Risk_Class",
     "Dominant_Environmental_Driver",
     "Nearest_Classified_Road_m",
-    "Nearest_Road_Class",
+    "Nearest_Road_Class"
 ]
 
-download_df = risk_df[download_columns].copy()
+download_df = risk_df[
+    download_columns
+].copy()
+
 
 st.download_button(
-    label="Download Ladywood Environmental Assessment Results",
-    data=download_df.to_csv(index=False).encode("utf-8"),
-    file_name="Ladywood_Environmental_Assessment.csv",
+    label="Download Ladywood Environmental assessment Results",
+    data=download_df.to_csv(
+        index=False
+    ),
+    file_name=(
+        "Ladywood_Environmental_assessment.csv"
+    ),
     mime="text/csv"
 )
