@@ -1456,11 +1456,8 @@ st.subheader(
 
 st.caption(
     "This table compares the official Ladywood LSOA(small neighbhourhoods) areas "
-    "using climate/environmental vulnerability, flood exposure "
-    "and brownfield exposure. The indicators are normalised "
-    "before being combined into a transparent assessment index. "
-    "Missing source data are not converted into artificial zeros(its represented as blank)."
-)
+    "using climate vulnerability, flood exposure "
+    "and brownfield exposure.") 
 
 
 table_columns = [
@@ -1594,7 +1591,7 @@ st.bar_chart(
 # ============================================================
 
 st.subheader(
-    "Climate / Environmental Vulnerability by Ladywood Area"
+    "Climate Vulnerability by Ladywood Area"
 )
 
 st.caption(
@@ -1630,8 +1627,7 @@ st.subheader(
 
 st.caption(
     "Percentage of each official Ladywood LSOA(small neighbhourhood) intersecting "
-    "the combined flood assessment extent. Flood Zone 3 and "
-    "surface flooding are kept as separate map layers."
+    "the combined flood assessment extent."
 )
 
 flood_chart = (
@@ -1650,30 +1646,6 @@ st.bar_chart(
     flood_chart
 )
 
-
-# ============================================================
-# CHART 4 — FLOOD DETAIL
-# ============================================================
-
-st.subheader(
-    "Flood Exposure Components")
-
-flood_detail = (
-    risk_df[
-        [
-            "LSOA21NM",
-            "Flood_Zone_3_%",
-            "Surface_Flood_%"
-        ]
-    ]
-    .set_index(
-        "LSOA21NM"
-    )
-)
-
-st.bar_chart(
-    flood_detail
-)
 
 
 # ============================================================
