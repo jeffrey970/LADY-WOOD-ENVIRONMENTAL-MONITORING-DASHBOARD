@@ -4,7 +4,6 @@ import requests
 import folium
 import re
 
-from io import BytesIO, StringIO
 from shapely.geometry import (
     Polygon,
     MultiPolygon,
@@ -56,11 +55,6 @@ BROWNFIELD_LAYER = (
 ROAD_LAYER = (
     "https://maps.birmingham.gov.uk/server/rest/services/"
     "Internet_Highways_open/MapServer/26"
-)
-
-AIR_2025_URL = (
-    "https://uk-air.defra.gov.uk/datastore/data_files/"
-    "site_data/BMLD_2025.csv?v=1"
 )
 
 
@@ -876,6 +870,7 @@ risk_df[
 )
 
 
+
 # ============================================================
 # ROAD PROXIMITY
 # ============================================================
@@ -966,27 +961,6 @@ risk_df[
 ]
 
 
-# ============================================================
-# AIR QUALITY — DEFRA BIRMINGHAM LADYWOOD 2025
-# ============================================================
-
-air_df = None
-air_error = None
-
-
-try:
-
-    response = requests.get(
-        AIR_2025_URL,
-        timeout=90
-    )
-
-    response.raise_for_status()
-
-    raw_text = response.content.decode(
-        "utf-8-sig",
-        errors="replace"
-    )
 
     # --------------------------------------------------------
     # Find the real CSV header.
@@ -2002,168 +1976,6 @@ st.bar_chart(
 )
 
 
-# ============================================================
-# DEFRA AIR QUALITY
-# ============================================================
-
-st.subheader(
-    "Measured Air Quality — Birmingham Ladywood, 2025"
-)
-
-st.caption(
-    "Measured at the official Birmingham Ladywood DEFRA "
-    "monitoring site. These measurements describe the Ladywood "
-    "monitoring location and are not treated as if each LSOA "
-    "has its own air-quality monitor."
-)
-
-
-if air_df is None:
-
-    st.error(
-        "The DEFRA Birmingham Ladywood 2025 file could not "
-        "be loaded."
-    )
-
-    if air_error:
-        st.caption(
-            "Technical detail: "
-            + air_error
-        )
-
-
-elif air_df.empty:
-
-    st.warning(
-        "The DEFRA file loaded, but no valid dated records "
-        "were available."
-    )
-
-
-else:
-
-    # --------------------------------------------------------
-    # AIR DATA SUMMARY
-    # --------------------------------------------------------
-
-    no2_count = (
-        air_df["NO2"]
-        .notna()
-        .sum()
-    )
-
-    pm25_count = (
-        air_df["PM2.5"]
-        .notna()
-        .sum()
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        st.metric(
-            "NO₂ valid hourly records",
-            f"{no2_count:,}"
-        )
-
-    with col2:
-
-        st.metric(
-            "PM₂.₅ valid hourly records",
-            f"{pm25_count:,}"
-        )
-
-    with col3:
-
-        st.metric(
-            "Months available",
-            air_df["Month"].nunique()
-        )
-
-
-    # --------------------------------------------------------
-    # MONTHLY AVERAGES
-    # --------------------------------------------------------
-
-    monthly_air = (
-        air_df
-        .groupby("Month")[
-            ["NO2", "PM2.5"]
-        ]
-        .mean()
-    )
-
-
-    st.markdown(
-        "### Monthly NO₂ trend"
-    )
-
-    st.line_chart(
-        monthly_air["NO2"]
-    )
-
-
-    st.markdown(
-        "### Monthly PM₂.₅ trend"
-    )
-
-    st.line_chart(
-        monthly_air["PM2.5"]
-    )
-
-
-    st.markdown(
-        "### Monthly NO₂ and PM₂.₅"
-    )
-
-    st.line_chart(
-        monthly_air[
-            [
-                "NO2",
-                "PM2.5"
-            ]
-        ]
-    )
-
-
-    # --------------------------------------------------------
-    # AIR MONTHLY TABLE
-    # --------------------------------------------------------
-
-    air_monthly_display = (
-        monthly_air
-        .rename(
-            columns={
-                "NO2":
-                    "NO2 monthly mean",
-                "PM2.5":
-                    "PM2.5 monthly mean"
-            }
-        )
-    )
-
-    st.dataframe(
-        air_monthly_display,
-        use_container_width=True
-    )
-
-
-    # --------------------------------------------------------
-    # PM4.5
-    # --------------------------------------------------------
-
-    st.markdown(
-        "### PM₄.₅"
-    )
-
-    st.info(
-        "PM₄.₅ is not substituted with PM₂.₅ or PM₁₀. "
-        "The official Birmingham Ladywood DEFRA dataset used "
-        "here provides PM₂.₅, but does not provide a PM₄.₅ "
-        "measurement. Therefore no PM₄.₅ values are invented."
-    )
-
 
 # ============================================================
 # CLASSIFIED ROADS
@@ -2326,33 +2138,3 @@ st.download_button(
     ),
     mime="text/csv"
 )
-
-
-# ============================================================
-# AIR DOWNLOAD
-# ============================================================
-
-if air_df is not None and not air_df.empty:
-
-    monthly_download = (
-        air_df
-        .groupby("Month")[
-            [
-                "NO2",
-                "PM2.5"
-            ]
-        ]
-        .mean()
-        .reset_index()
-    )
-
-    st.download_button(
-        label="Download Ladywood 2025 Air Monthly Results",
-        data=monthly_download.to_csv(
-            index=False
-        ),
-        file_name=(
-            "Birmingham_Ladywood_2025_Air_Monthly.csv"
-        ),
-        mime="text/csv"
-    )
