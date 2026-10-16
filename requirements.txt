@@ -4,3 +4,5 @@ requests
 pyproj
 folium
 shapely
+geopandas
+streamlit-folium
