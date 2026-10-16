@@ -369,13 +369,13 @@ else:
     st.dataframe(priority_df[["LSOA21CD", "LSOA21NM", "Environmental_Index", "Dominant_Environmental_Driver"]], use_container_width=True, hide_index=True)
 
 st.subheader("Environmental Risk by Ladywood Area")
-st.caption("Higher values indicate higher combined project screening scores; this is not an official statutory risk rating.")
+st.caption("Higher values indicate higher combined project assessment scores")
 st.bar_chart(risk_df.set_index("LSOA21NM")[["Environmental_Index"]])
 st.subheader("Climate Vulnerability by Ladywood Area")
 st.caption("Official numeric MEAN value from Birmingham's 2025 LSOA environmental-risk dataset.")
 st.bar_chart(risk_df.set_index("LSOA21NM")[["CRVA_MEAN"]])
 st.subheader("Surface Flooding Exposure by Ladywood Area")
-st.caption("Percentage of each LSOA intersecting the available surface-flooding extent. Missing data are left unavailable, not treated as zero.")
+st.caption("Percentage of each LSOA intersecting the available surface-flooding extent. Missing data is not treated as zero.")
 st.bar_chart(risk_df.set_index("LSOA21NM")[["Surface_Flood_%"]])
 st.subheader("Brownfield Exposure by Ladywood Area")
 st.caption("Percentage of each LSOA intersecting the Birmingham Brownfield Register layer.")
@@ -394,8 +394,8 @@ else:
     st.warning("No classified-road features were returned inside Ladywood.")
 st.subheader("Classified Road Proximity by Ladywood Area")
 st.dataframe(risk_df[["LSOA21CD", "LSOA21NM", "Nearest_Classified_Road_m", "Nearest_Road_Class"]].sort_values("Nearest_Classified_Road_m", na_position="last"), use_container_width=True, hide_index=True)
-st.subheader("Engineering Assessment Interpretation")
-st.caption("The dashboard applies a source → pathway → receptor screening approach. Indicators identify where further engineering investigation may be useful; they do not replace site investigation or statutory environmental assessment.")
+st.subheader("Engineering Assessment Interpretation File")
+st.caption("Indicators identify where further engineering investigation may be useful.")
 
 # ============================================================
 # DOWNLOAD
