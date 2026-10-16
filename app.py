@@ -216,14 +216,6 @@ if lsoa_df.empty:
     st.stop()
 lsoa_df["CRVA_MEAN"] = pd.to_numeric(lsoa_df["MEAN"], errors="coerce")
 
-# ============================================================
-# LOAD ENVIRONMENTAL DATA
-# ============================================================
-st.subheader("Environmental data loading")
-flood3_features, flood3_error = load_spatial_layer(FLOOD_ZONE_3_LAYER, "Flood Zone 3 (fluvial, high probability)", ladywood_geometry, ladywood_bbox)
-surface_features, surface_error = load_spatial_layer(SURFACE_FLOOD_LAYER, "Surface flooding", ladywood_geometry, ladywood_bbox)
-brownfield_features, brownfield_error = load_spatial_layer(BROWNFIELD_LAYER, "Brownfield register", ladywood_geometry, ladywood_bbox)
-road_features, road_error = load_spatial_layer(ROAD_LAYER, "Classified roads", ladywood_geometry, ladywood_bbox)
 
 # ============================================================
 # CALCULATE EXPOSURE BY LSOA
