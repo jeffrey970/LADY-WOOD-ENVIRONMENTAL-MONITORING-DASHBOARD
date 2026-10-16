@@ -1500,14 +1500,6 @@ st.subheader(
     "Priority Ladywood Areas for Further Investigation"
 )
 
-st.caption(
-    "Priority is based on the environmental assessment index. "
-    "This is an engineering assessment calculation for the "
-    "project, not an official Birmingham statutory risk rating."
-)
-
-
-
 
 priority_df = risk_df[
     risk_df["Risk_Class"] == "HIGH"
