@@ -129,7 +129,6 @@ def load_spatial_layer(layer_url, label, ward_geom, bbox):
             clipped = geom.intersection(ward_geom)
             if not clipped.is_empty:
                 feats.append({"attributes": row, "geometry": clipped})
-        st.caption(f"{label}: {len(feats)} feature(s) intersect Ladywood.")
         return feats, None
     except Exception as exc:
         st.warning(f"Could not load {label}: {exc}")
@@ -218,7 +217,6 @@ lsoa_df["CRVA_MEAN"] = pd.to_numeric(lsoa_df["MEAN"], errors="coerce")
 # ============================================================
 # LOAD ENVIRONMENTAL DATA
 # ============================================================
-st.subheader("Environmental data loading")
 surface_features, surface_error = load_spatial_layer(SURFACE_FLOOD_LAYER, "Surface flooding", ladywood_geometry, ladywood_bbox)
 brownfield_features, brownfield_error = load_spatial_layer(BROWNFIELD_LAYER, "Brownfield register", ladywood_geometry, ladywood_bbox)
 road_features, road_error = load_spatial_layer(ROAD_LAYER, "Classified roads", ladywood_geometry, ladywood_bbox)
@@ -347,7 +345,7 @@ marker_group.add_to(m)
 folium.LayerControl(collapsed=False).add_to(m)
 
 st.subheader("Ladywood Environmental Map")
-st.caption("Use the layer control in the top-right of the map to turn environmental layers on and off. Flood Zone 3 has been excluded because the source layer did not return usable features.")
+st.caption("Use the layer control in the top-right of the map to turn environmental layers on and off.")
 st.components.v1.html(m.get_root().render(), height=680, scrolling=False)
 
 # ============================================================
