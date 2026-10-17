@@ -1,296 +1,265 @@
-import base64
-from io import BytesIO
-
-import geopandas as gpd
-import pandas as pd
-import requests
 import streamlit as st
+import pandas as pd
+import json
+import requests
+import geopandas as gpd
+import matplotlib.pyplot as plt
 import folium
-from folium.raster_layers import ImageOverlay
 from streamlit_folium import st_folium
-from shapely.geometry import shape
+from shapely.geometry import shape, mapping
 
-# Ladywood Environmental Monitoring Dashboard
-# Data sources are official Birmingham City Council ArcGIS services.
-# This is a screening dashboard, not a statutory risk assessment.
-# It does not invent missing values or claim that background-station data
-# has been measured separately in the four development-plan sub-zones.
-
-st.set_page_config(page_title="Ladywood Environmental Monitoring Dashboard",
-                   layout="wide")
+st.set_page_config(page_title="Ladywood Environmental Monitoring Dashboard", layout="wide")
 st.title("Ladywood Environmental Monitoring Dashboard")
-st.caption("Ladywood, Birmingham, UK | Official council spatial layers")
+st.caption("Ladywood, Birmingham | CRVA factors 3–9 | Official council data where published")
 
-CRVA_URL = (
-    "https://maps.birmingham.gov.uk/server/rest/services/"
-    "CRVA/CRVA_2025/MapServer"
-)
-BOUNDARIES_URL = (
-    "https://maps.birmingham.gov.uk/server/rest/services/"
-    "Internet_Boundaries/MapServer"
-)
-BROWNFIELD_URL = (
-    "https://maps.birmingham.gov.uk/server/rest/services/"
-    "planning/HELAA/MapServer"
-)
+CRVA = "https://maps.birmingham.gov.uk/server/rest/services/CRVA/CRVA_2025/MapServer"
+WARD_URL = f"{CRVA}/12/query"
+TIMEOUT = 90
 
-REQUEST_TIMEOUT = 60
-
-
-def get_json(url, params=None):
-    """Request JSON from an ArcGIS REST endpoint and raise readable errors."""
-    response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, dict) and data.get("error"):
-        error = data["error"]
-        message = error.get("message", "ArcGIS REST request failed")
-        details = error.get("details", [])
-        if details:
-            message += " — " + "; ".join(str(x) for x in details)
-        raise RuntimeError(message)
+def arcgis_json(url, params):
+    r = requests.get(url, params=params, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("error"):
+        err = data["error"]
+        raise RuntimeError(err.get("message", "ArcGIS request failed") + " " +
+                           "; ".join(err.get("details", [])))
     return data
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_ladywood():
+    # CRVA ward layer has WARDNME and is queried without resultRecordCount
+    data = arcgis_json(WARD_URL, {
+        "where": "WARDNME = 'Ladywood'",
+        "outFields": "WARDNME,MEAN,MEDIAN,MIN,MAX,MINIMUM_RISK,AVERAGE_RISK,MAXIMUM_RISK",
+        "returnGeometry": "true", "outSR": "27700", "f": "geojson"
+    })
+    features = data.get("features", [])
+    if not features:
+        raise RuntimeError("CRVA ward query returned no Ladywood feature.")
+    records = []
+    for f in features:
+        if f.get("geometry"):
+            records.append({**(f.get("properties") or {}),
+                            "geometry": shape(f["geometry"])})
+    return gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:27700")
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_ladywood_boundary():
-    """ Download ward features without filtering on the server, then match WARDNME locally. This avoids a server-side SQL/name-filter mismatch. """
-    # The dedicated boundary service documents layer 0 as Wards with WARDNME.
-    # The alternate published mybrummap boundary service is used only if needed.
-    services = [
-        f"{BOUNDARIES_URL}/0/query",
-        "https://maps.birmingham.gov.uk/server/rest/services/"
-        "mybrummap/mybrummap_Boundaries/MapServer/0/query",
-    ]
-    errors = []
-    for url in services:
-        try:
-            params = {
-                "where": "1=1",
-                "outFields": "WARDNME",
-                "returnGeometry": "true",
-                "outSR": "4326",
-                "f": "geojson",
-            }
-            data = get_json(url, params)
-            records = []
-            for feature in data.get("features", []):
-                props = feature.get("properties", {}) or {}
-                ward_name = str(props.get("WARDNME", "")).strip()
-                geom = feature.get("geometry")
-                if ward_name.casefold() == "ladywood" and geom:
-                    records.append({
-                        "WARDNME": ward_name,
-                        "geometry": shape(geom),
-                    })
-            if records:
-                gdf = gpd.GeoDataFrame(
-                    records, geometry="geometry", crs="EPSG:4326"
-                )
-                return gdf.dissolve(by="WARDNME", as_index=False)
-            errors.append(f"{url}: no feature matched WARDNME='Ladywood'")
-        except Exception as exc:
-            errors.append(f"{url}: {exc}")
-    raise RuntimeError(
-        "Neither official ward-boundary endpoint returned a Ladywood feature. "
-        + " | ".join(errors)
-    )
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_lsoa_scores(boundary_geojson):
-    """Download the council's pre-calculated CRVA-by-LSOA layer, spatially filtered."""
-    # The official CRVA-by-2021-LSOA layer is used as published.
-    # No substitute score or invented factor values are calculated here.
-    url = f"{CRVA_URL}/15/query"
+def load_vector_layer(layer_id, boundary_geojson):
     boundary = shape(boundary_geojson)
     minx, miny, maxx, maxy = boundary.bounds
+    url = f"{CRVA}/{layer_id}/query"
+    # Return all intersecting features in the ward envelope, then clip exactly to ward.
     params = {
         "where": "1=1",
         "geometry": f"{minx},{miny},{maxx},{maxy}",
         "geometryType": "esriGeometryEnvelope",
         "spatialRel": "esriSpatialRelIntersects",
-        "inSR": "4326",
-        "outFields": "*",
-        "returnGeometry": "true",
-        "outSR": "4326",
-        "f": "geojson",
+        "inSR": "27700", "outFields": "*", "returnGeometry": "true",
+        "outSR": "27700", "f": "geojson"
     }
-    data = get_json(url, params)
+    data = arcgis_json(url, params)
     rows = []
-    for feature in data.get("features", []):
-        geom = feature.get("geometry")
-        if geom:
-            row = feature.get("properties", {}).copy()
-            row["geometry"] = shape(geom)
-            rows.append(row)
+    for f in data.get("features", []):
+        if f.get("geometry"):
+            rows.append({**(f.get("properties") or {}),
+                         "geometry": shape(f["geometry"])})
     if not rows:
-        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
-    # Clip to the Ladywood ward; keep only geometries that intersect it.
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:27700")
+    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:27700")
     gdf = gdf[gdf.geometry.intersects(boundary)].copy()
     gdf["geometry"] = gdf.geometry.intersection(boundary)
-    gdf = gdf[~gdf.geometry.is_empty]
-    return gdf
+    return gdf[~gdf.geometry.is_empty].copy()
 
-
-def arcgis_export_overlay(layer_id, bounds, opacity=0.65):
-    """ Fetch one official MapServer layer as a transparent map image and place it over the ward. This also supports map-service layers that are not queryable as ordinary vector features. """
-    minx, miny, maxx, maxy = bounds
-    export_url = f"{CRVA_URL}/export"
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_raster_histogram(layer_id, boundary_geojson):
+    """ Ask ArcGIS for raster VALUE/COUNT classes intersecting Ladywood. Some ArcGIS raster layers do not support this query; callers show that honestly. """
+    boundary = shape(boundary_geojson)
     params = {
-        "bbox": f"{minx},{miny},{maxx},{maxy}",
-        "bboxSR": "4326",
-        "imageSR": "4326",
-        "size": "1200,900",
-        "format": "png32",
-        "transparent": "true",
-        "layers": f"show:{layer_id}",
-        "f": "image",
+        "where": "1=1",
+        "geometry": json.dumps(mapping(boundary)),
+        "geometryType": "esriGeometryPolygon",
+        "spatialRel": "esriSpatialRelIntersects",
+        "inSR": "27700",
+        "outFields": "*",
+        "returnGeometry": "false",
+        "f": "json"
     }
-    response = requests.get(export_url, params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    content_type = response.headers.get("Content-Type", "")
-    if "image" not in content_type.lower():
-        # ArcGIS may return a JSON error even when f=image was requested.
-        try:
-            payload = response.json()
-            if payload.get("error"):
-                raise RuntimeError(payload["error"].get("message", "Map export failed"))
-        except ValueError:
-            pass
-        raise RuntimeError(f"Layer {layer_id} did not return a map image.")
-    encoded = base64.b64encode(response.content).decode("ascii")
-    image_url = f"data:image/png;base64,{encoded}"
-    return ImageOverlay(
-        image=image_url,
-        bounds=[[miny, minx], [maxy, maxx]],
-        opacity=opacity,
-        interactive=True,
-        cross_origin=False,
-        zindex=2,
-    )
+    data = arcgis_json(f"{CRVA}/{layer_id}/query", params)
+    rows = data.get("features", [])
+    vals = []
+    for row in rows:
+        attrs = row.get("attributes", {})
+        value = attrs.get("VALUE", attrs.get("Value", attrs.get("value")))
+        count = attrs.get("COUNT", attrs.get("Count", attrs.get("count")))
+        if value is not None and count is not None:
+            vals.append({"Class/value": str(value), "Pixel/cell count": float(count)})
+    return pd.DataFrame(vals)
 
+def chart_bar(df, x, y, title, xlabel=None, ylabel=None, rotation=35):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(df[x].astype(str), df[y])
+    ax.set_title(title)
+    ax.set_xlabel(xlabel or x)
+    ax.set_ylabel(ylabel or y)
+    ax.tick_params(axis="x", labelrotation=rotation)
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
 
-def add_legend(map_obj):
-    legend_html = """ <div style=" position: fixed; bottom: 24px; left: 24px; z-index: 9999; background: white; border: 1px solid #777; border-radius: 4px; padding: 8px 10px; font-size: 12px; max-width: 240px;"> <b>Interpretation</b><br> CRVA layers are official council screening information.<br> Overlay colours follow the council's map symbology.<br> Missing data is not treated as zero. </div> """
-    map_obj.get_root().html.add_child(folium.Element(legend_html))
-
-
-# Factor names and official layer IDs from the council's CRVA_2025 MapServer.
-# Layers 109 and 108 are the high- and medium-probability fluvial flood zones.
-# Factors are displayed from the council map service; this app does not recreate
-# factor scores where the official data is not provided as a queryable score.
-LAYER_OPTIONS = {
-    "Official CRVA score by 2021 LSOA": {"id": 15, "group": "Official CRVA"},
-    "Fluvial flood — Zone 3 (high probability)": {"id": 109, "group": "Flooding"},
-    "Fluvial flood — Zone 2 (medium probability)": {"id": 108, "group": "Flooding"},
-    "Surface-water flooding": {"id": 1546, "group": "Flooding"},
-    "Surface temperature (1981–2000 baseline)": {"id": 18, "group": "Climate"},
-    "Local Climate Zones": {"id": 4, "group": "Climate"},
-    "NO₂ concentration layer": {"id": 8, "group": "Air quality"},
-    "PM₂.₅ concentration layer": {"id": 9, "group": "Air quality"},
-    "Greenspace layer": {"id": 1549, "group": "Greenspace"},
-    "Tree canopy / vegetation layer": {"id": 3, "group": "Greenspace"},
-}
-
-st.info(
-    "The council's CRVA is a multi-factor screening assessment. The map layers "
-    "below are shown as published by Birmingham City Council. The temperature "
-    "layer uses a 1981–2000 baseline, so it must not be described as current "
-    "temperature. Air-quality layers are not the same as measurements for each "
-    "of the four development-plan sub-zones."
-)
+def query_coverage(layer_id, boundary):
+    gdf = load_vector_layer(layer_id, mapping(boundary))
+    if gdf.empty:
+        return gdf, 0.0
+    clipped_union = gdf.geometry.unary_union
+    covered = clipped_union.intersection(boundary).area
+    pct = min(100.0, 100.0 * covered / boundary.area) if boundary.area else 0.0
+    return gdf, pct
 
 with st.sidebar:
-    st.header("Map controls")
-    selected_layers = st.multiselect(
-        "Select official map layers",
-        options=list(LAYER_OPTIONS.keys()),
-        default=["Official CRVA score by 2021 LSOA",
-                 "Surface-water flooding"],
-    )
-    opacity = st.slider("Overlay opacity", min_value=0.2, max_value=1.0,
-                        value=0.65, step=0.05)
-    show_boundary = st.checkbox("Show Ladywood ward boundary", value=True)
-    show_layer_info = st.checkbox("Show layer notes", value=True)
+    st.header("Controls")
+    show_map = st.checkbox("Show map", True)
+    show_raw = st.checkbox("Show extracted tables", True)
 
 try:
-    boundary_gdf = get_ladywood_boundary()
-    boundary_geom = boundary_gdf.geometry.unary_union
-    boundary_bounds = boundary_geom.bounds
-except Exception as exc:
-    st.error(
-        "Could not load the official Ladywood ward boundary. "
-        "The dashboard stopped rather than drawing a guessed boundary."
-    )
-    st.code(str(exc))
+    ward = load_ladywood()
+    boundary = ward.geometry.union_all()
+except Exception as e:
+    st.error("Could not retrieve Ladywood from the official CRVA ward layer.")
+    st.code(str(e))
     st.stop()
 
-minx, miny, maxx, maxy = boundary_bounds
-center = [(miny + maxy) / 2, (minx + maxx) / 2]
-m = folium.Map(location=center, zoom_start=13, tiles="OpenStreetMap",
-               control_scale=True)
+boundary = boundary.buffer(0)
+boundary_gdf = gpd.GeoDataFrame({"name": ["Ladywood"]}, geometry=[boundary], crs="EPSG:27700")
+boundary_4326 = boundary_gdf.to_crs("EPSG:4326")
+ward_row = ward.iloc[0]
 
-if show_boundary:
-    folium.GeoJson(
-        boundary_gdf.__geo_interface__,
-        name="Ladywood ward boundary",
-        style_function=lambda feature: {
-            "color": "#d7191c",
-            "weight": 3,
-            "fill": False,
-            "fillOpacity": 0,
-        },
-        tooltip=folium.GeoJsonTooltip(fields=["WARDNME"], aliases=["Ward:"]),
-    ).add_to(m)
+st.subheader("Official CRVA ward summary")
+cols = st.columns(4)
+for col, label, field in zip(cols, ["Mean CRVA score", "Median CRVA score", "Minimum score", "Maximum score"],
+                              ["MEAN", "MEDIAN", "MIN", "MAX"]):
+    val = ward_row.get(field)
+    col.metric(label, f"{float(val):.2f}" if pd.notna(val) else "Not available")
+st.caption("These are the council's published combined ward-level CRVA statistics, not individual scores for factors 3–9.")
 
-overlay_errors = []
-for layer_name in selected_layers:
-    layer_id = LAYER_OPTIONS[layer_name]["id"]
-    try:
-        overlay = arcgis_export_overlay(layer_id, boundary_bounds, opacity)
-        overlay.layer_name = layer_name
-        overlay.add_to(m)
-    except Exception as exc:
-        overlay_errors.append((layer_name, str(exc)))
+if show_map:
+    geom = boundary_4326.geometry.iloc[0]
+    bounds = geom.bounds
+    m = folium.Map(location=[(bounds[1]+bounds[3])/2, (bounds[0]+bounds[2])/2],
+                   zoom_start=13, tiles="OpenStreetMap", control_scale=True)
+    folium.GeoJson(boundary_4326.__geo_interface__,
+                   name="Ladywood boundary",
+                   style_function=lambda _: {"color": "red", "weight": 3, "fillOpacity": 0},
+                   tooltip="Ladywood ward").add_to(m)
+    folium.LayerControl().add_to(m)
+    st.subheader("Ladywood boundary map")
+    st_folium(m, use_container_width=True, height=450, returned_objects=[])
 
-folium.LayerControl(collapsed=False).add_to(m)
-add_legend(m)
-m.fit_bounds([[miny, minx], [maxy, maxx]])
+st.divider()
+st.header("Factors 3–9: extracted data and charts")
+st.write("The dashboard queries the council service and charts returned values. If a raster service does not expose a spatially filtered VALUE/COUNT table, the app reports that limitation instead of inventing values.")
 
-left, right = st.columns([2.2, 1])
-with left:
-    st.subheader("Interactive environmental map")
-    st_folium(m, use_container_width=True, height=650, returned_objects=[])
+# Factors 3 and 4: fluvial flood layers and surface-water flood extent are polygon features.
+factor_results = []
+vector_specs = [
+    (3, "Fluvial flooding — Zone 3 high probability", 109),
+    (3, "Fluvial flooding — Zone 2 medium probability", 108),
+    (4, "Surface-water flooding extent", 1546),
+]
+for factor, name, layer_id in vector_specs:
+    with st.spinner(f"Extracting {name}..."):
+        try:
+            layer, pct = query_coverage(layer_id, boundary)
+            factor_results.append({
+                "Factor": f"Factor {factor}",
+                "Indicator": name,
+                "Features returned": len(layer),
+                "Ward area intersected (%)": round(pct, 2),
+                "Status": "Extracted from official polygon layer"
+            })
+            with st.expander(f"{name} — extracted records"):
+                st.write(f"Features intersecting Ladywood: **{len(layer)}**")
+                st.write(f"Share of ward area covered by the union of features: **{pct:.2f}%**")
+                st.caption("Coverage is calculated from clipped source polygons; it is not the official CRVA 0–1 factor score.")
+                if show_raw and not layer.empty:
+                    cols_to_show = [c for c in layer.columns if c != "geometry"]
+                    st.dataframe(layer[cols_to_show].head(100), use_container_width=True)
+        except Exception as e:
+            factor_results.append({"Factor": f"Factor {factor}", "Indicator": name,
+                                   "Features returned": None, "Ward area intersected (%)": None,
+                                   "Status": f"Query failed: {e}"})
 
-with right:
-    st.subheader("Selected layers")
-    if selected_layers:
-        for name in selected_layers:
-            item = LAYER_OPTIONS[name]
-            st.markdown(f"**{name}**")
-            st.caption(f"Official CRVA MapServer layer ID: {item['id']} · {item['group']}")
-    else:
-        st.write("Choose one or more layers from the sidebar.")
+# Chart vector coverage where numeric values were actually extracted.
+vector_df = pd.DataFrame(factor_results)
+if not vector_df.empty:
+    st.subheader("Flooding: mapped footprint within Ladywood")
+    chart_df = vector_df.dropna(subset=["Ward area intersected (%)"]).copy()
+    if not chart_df.empty:
+        chart_bar(chart_df, "Indicator", "Ward area intersected (%)",
+                  "Mapped flood polygon coverage within Ladywood",
+                  ylabel="Share of ward area (%)", rotation=25)
+    if show_raw:
+        st.dataframe(vector_df, use_container_width=True)
 
-if overlay_errors:
-    st.warning(
-        "Some selected layers could not be rendered. Other layers remain available. "
-        "The app does not replace failed layers with fabricated data."
-    )
-    for layer_name, message in overlay_errors:
-        with st.expander(f"Error: {layer_name}"):
-            st.code(message)
+# Factors 5, 6, 9 are raster layers; query their class/value counts if the REST service supports it.
+raster_specs = [
+    (5, "Surface temperature maximum (1981–2000)", 18),
+    (6, "Local Climate Zones", 4),
+    (9, "Tree canopy / vegetation raster", 3),
+]
+raster_tables = []
+for factor, name, layer_id in raster_specs:
+    with st.spinner(f"Requesting raster values for {name}..."):
+        try:
+            df = load_raster_histogram(layer_id, mapping(boundary))
+            if df.empty:
+                st.warning(f"{name}: the service did not return a spatially filtered value/count table. No chart was fabricated.")
+                raster_tables.append({"Factor": factor, "Indicator": name, "Status": "No extractable ward-specific VALUE/COUNT table"})
+            else:
+                df["Indicator"] = name
+                df["Factor"] = factor
+                raster_tables.append({"Factor": factor, "Indicator": name, "Status": f"Extracted {len(df)} value classes"})
+                st.subheader(name)
+                chart_bar(df, "Class/value", "Pixel/cell count",
+                          f"{name}: returned raster value counts",
+                          ylabel="Cell/pixel count", rotation=0)
+                if show_raw:
+                    st.dataframe(df, use_container_width=True)
+        except Exception as e:
+            st.warning(f"{name}: raster values could not be extracted through the available query endpoint. {e}")
+            raster_tables.append({"Factor": factor, "Indicator": name, "Status": f"Not extractable by this query: {e}"})
 
-if show_layer_info:
-    st.subheader("What this dashboard can and cannot claim")
-    st.markdown(
-        """ - **Official CRVA score:** use the council's published LSOA layer; do not label a project-created score as the official CRVA score. - **Flooding, climate, greenspace and vegetation layers:** these are spatial screening layers from the council service. Their displayed colours/symbology are supplied by the service. - **Air quality:** the NO₂ and PM₂.₅ map layers do not automatically provide measured monthly concentrations for each project sub-zone. A background monitoring station cannot be treated as four separate measurements without a defensible spatial model. - **Greenspace deficit:** a greenspace polygon layer is not, by itself, the council's calculated open-greenspace-deficit score. - **Brownfield land:** it is not one of the 11 CRVA factors. Add it as a separate indicator only after verifying the correct official brownfield register service and layer. - **Missing values:** missing data remain missing; they are never converted to zero. """
-    )
+st.subheader("Factors 7–8: greenspace deficit")
+st.warning(
+    "The published CRVA service exposes a greenspace polygon layer (1549), buildings (1550), "
+    "and woodland (1552), but does not expose separate, pre-calculated Ladywood tables for "
+    "the official open-greenspace-deficit and other-greenspace-deficit scores. A polygon count "
+    "or greenspace area is not the same as the council's 100 m grid deficit score. These two "
+    "official scores are therefore not plotted as if they had been extracted."
+)
+try:
+    greenspace = load_vector_layer(1549, mapping(boundary))
+    if not greenspace.empty:
+        greenspace["clipped_area_m2"] = greenspace.geometry.area
+        by_type = (greenspace.groupby("type", dropna=False)["clipped_area_m2"]
+                   .sum().reset_index().sort_values("clipped_area_m2", ascending=False))
+        st.subheader("Greenspace source data available in Ladywood (supporting evidence, not deficit score)")
+        chart_bar(by_type, "type", "clipped_area_m2",
+                  "Area of mapped greenspace polygons by source category",
+                  ylabel="Area (m²)", rotation=35)
+        if show_raw:
+            st.dataframe(by_type, use_container_width=True)
+except Exception as e:
+    st.warning(f"Could not extract greenspace source polygons: {e}")
 
-st.caption(
-    "Sources: Birmingham City Council CRVA 2025 MapServer and dedicated ward "
-    "boundary service. Verify the service's layer metadata and methodology before "
-    "using results for formal decisions."
+st.subheader("Extraction status")
+status_df = pd.DataFrame(raster_tables)
+if not status_df.empty:
+    st.dataframe(status_df, use_container_width=True)
+st.markdown(
+    """ **Interpretation rules** - Flood polygon coverage is a project-calculated spatial summary, not an official CRVA factor score. - Temperature raster is a historical 1981–2000 baseline, not a current temperature reading. - Local climate zone values are categorical classes; they should not be averaged as if they were temperatures. - Tree canopy raster query failures are reported, not replaced with guessed canopy percentages. - The official CRVA methodology uses a 100 m grid and standardised factor scores. The ward-level combined score above is supplied by the council. """
+)
+st.markdown(
+    f"**Sources:** [Birmingham City Council CRVA map]({CRVA}) · "
+    "[Council CRVA methodology](https://research.birmingham.ac.uk/files/253369474/CRVA_methodology_guidancedoc_v1.1.pdf)"
 )
