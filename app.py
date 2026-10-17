@@ -1,4 +1,4 @@
-Environmental_Assessment.csv", mime="text/csv") import streamlit as st
+import streamlit as st
 import pandas as pd
 import requests
 import folium
@@ -402,4 +402,4 @@ st.caption("Indicators identify where further engineering investigation may be u
 # ============================================================
 download_columns = ["LSOA21CD", "LSOA21NM", "Area_m2", "CRVA_MEAN", "CRVA_AVERAGE_RISK", "Climate_Index", "Surface_Flood_%", "Surface_Flood_Index", "Brownfield_Exposure_%", "Brownfield_Index", "Environmental_Index", "Risk_Class", "Dominant_Environmental_Driver", "Nearest_Classified_Road_m", "Nearest_Road_Class"]
 download_df = risk_df[download_columns].copy()
-st.download_button(label="Download Ladywood Environmental Assessment Results", data=download_df.to_csv(index=False), file_name="Ladywood_
+st.download_button(label="Download Ladywood Environmental Assessment Results", data=download_df.to_csv(index=False), file_name="Ladywood_Environmental_Assessment.csv", mime="text/csv")
