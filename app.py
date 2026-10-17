@@ -54,32 +54,47 @@ def get_json(url, params=None):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_ladywood_boundary():
-    """Get Ladywood ward from the dedicated ward-boundary service."""
-    url = f"{BOUNDARIES_URL}/0/query"
-    params = {
-        "where": "WARDNME = 'Ladywood'",
-        "outFields": "WARDNME",
-        "returnGeometry": "true",
-        "outSR": "4326",
-        "f": "geojson",
-    }
-    data = get_json(url, params)
-    features = data.get("features", [])
-    records = []
-    for feature in features:
-        geom = feature.get("geometry")
-        if geom:
-            records.append({
-                "WARDNME": feature.get("properties", {}).get("WARDNME", "Ladywood"),
-                "geometry": shape(geom),
-            })
-    if not records:
-        raise RuntimeError(
-            "The ward service returned no Ladywood boundary. "
-            "Check the service URL, field name, or network access."
-        )
-    gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
-    return gdf.dissolve(by="WARDNME", as_index=False)
+    """ Download ward features without filtering on the server, then match WARDNME locally. This avoids a server-side SQL/name-filter mismatch. """
+    # The dedicated boundary service documents layer 0 as Wards with WARDNME.
+    # The alternate published mybrummap boundary service is used only if needed.
+    services = [
+        f"{BOUNDARIES_URL}/0/query",
+        "https://maps.birmingham.gov.uk/server/rest/services/"
+        "mybrummap/mybrummap_Boundaries/MapServer/0/query",
+    ]
+    errors = []
+    for url in services:
+        try:
+            params = {
+                "where": "1=1",
+                "outFields": "WARDNME",
+                "returnGeometry": "true",
+                "outSR": "4326",
+                "f": "geojson",
+            }
+            data = get_json(url, params)
+            records = []
+            for feature in data.get("features", []):
+                props = feature.get("properties", {}) or {}
+                ward_name = str(props.get("WARDNME", "")).strip()
+                geom = feature.get("geometry")
+                if ward_name.casefold() == "ladywood" and geom:
+                    records.append({
+                        "WARDNME": ward_name,
+                        "geometry": shape(geom),
+                    })
+            if records:
+                gdf = gpd.GeoDataFrame(
+                    records, geometry="geometry", crs="EPSG:4326"
+                )
+                return gdf.dissolve(by="WARDNME", as_index=False)
+            errors.append(f"{url}: no feature matched WARDNME='Ladywood'")
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    raise RuntimeError(
+        "Neither official ward-boundary endpoint returned a Ladywood feature. "
+        + " | ".join(errors)
+    )
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
