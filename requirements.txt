@@ -6,3 +6,4 @@ folium
 shapely
 geopandas
 streamlit-folium
+matplotlib
