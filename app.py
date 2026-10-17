@@ -28,64 +28,40 @@ def arcgis_json(url, params):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_ladywood():
-    """ Use the dedicated official ward-boundary layer for geometry. Then attach the council's combined CRVA ward summary if that layer returns it. Geometry and CRVA statistics are queried separately so a CRVA summary query cannot prevent the map and factor charts from loading. """
-    boundary_url = (
-        "https://maps.birmingham.gov.uk/server/rest/services/"
-        "Internet_Boundaries/MapServer/0/query"
-    )
-    boundary_data = arcgis_json(boundary_url, {
+    """ Get Ladywood geometry from the CRVA service's dedicated Ward Boundaries layer (14), not the CRVA-by-Ward score layer (12). """
+    url = f"{CRVA}/14/query"
+    data = arcgis_json(url, {
         "where": "1=1",
-        "outFields": "WARDNME,AREASQM,AREAHECTARES",
+        "outFields": "*",
         "returnGeometry": "true",
         "outSR": "27700",
         "f": "geojson",
     })
-    boundary_features = boundary_data.get("features", [])
-    ladywood_feature = None
-    for feature in boundary_features:
+    features = data.get("features", [])
+    matched = []
+    ward_field_candidates = ("WARDNME", "WARD_NAME", "NAME", "WardName", "WARD")
+    for feature in features:
         props = feature.get("properties") or {}
-        name = str(props.get("WARDNME", "")).strip()
+        name = ""
+        for field in ward_field_candidates:
+            if field in props and props[field] is not None:
+                name = str(props[field]).strip()
+                if name:
+                    break
         if name.casefold() == "ladywood" and feature.get("geometry"):
-            ladywood_feature = feature
-            break
-
-    if ladywood_feature is None:
-        names = [
-            str((f.get("properties") or {}).get("WARDNME", "")).strip()
-            for f in boundary_features
+            matched.append({**props, "geometry": shape(feature["geometry"])})
+    if not matched:
+        sample = [
+            {k: v for k, v in (f.get("properties") or {}).items()
+             if "ward" in k.lower() or "name" in k.lower()}
+            for f in features[:3]
         ]
         raise RuntimeError(
-            "Ward boundary service did not return a Ladywood feature. "
-            f"Returned {len(boundary_features)} features; sample ward names: {names[:12]}"
+            "The dedicated CRVA ward-boundary layer (14) did not return a "
+            "feature named Ladywood. "
+            f"Returned {len(features)} features. Sample name fields: {sample}"
         )
-
-    properties = ladywood_feature.get("properties") or {}
-    properties = dict(properties)
-    properties["geometry"] = shape(ladywood_feature["geometry"])
-    boundary_gdf = gpd.GeoDataFrame(
-        [properties], geometry="geometry", crs="EPSG:27700"
-    )
-
-    # Optional published combined CRVA statistics. Failure here does not stop charts.
-    try:
-        crva_data = arcgis_json(f"{CRVA}/12/query", {
-            "where": "1=1",
-            "outFields": "WARDNME,MEAN,MEDIAN,MIN,MAX,MINIMUM_RISK,AVERAGE_RISK,MAXIMUM_RISK",
-            "returnGeometry": "false",
-            "f": "json",
-        })
-        for feature in crva_data.get("features", []):
-            attrs = feature.get("attributes") or {}
-            if str(attrs.get("WARDNME", "")).strip().casefold() == "ladywood":
-                for field in ["MEAN", "MEDIAN", "MIN", "MAX",
-                              "MINIMUM_RISK", "AVERAGE_RISK", "MAXIMUM_RISK"]:
-                    if field in attrs:
-                        boundary_gdf.loc[0, field] = attrs[field]
-                break
-    except Exception:
-        pass
-
-    return boundary_gdf
+    return gpd.GeoDataFrame(matched, geometry="geometry", crs="EPSG:27700")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -285,7 +261,7 @@ try:
     greenspace = load_vector_layer(1549, mapping(boundary))
     if not greenspace.empty:
         greenspace["clipped_area_m2"] = greenspace.geometry.area
-        by_type = (greenspace.groupby("type", dropna=False)["clipped_area_m2"]
+        by_type = (greenspace.groupby("type" if "type" in greenspace.columns else greenspace.columns[0], dropna=False)["clipped_area_m2"]
                    .sum().reset_index().sort_values("clipped_area_m2", ascending=False))
         st.subheader("Greenspace source data available in Ladywood (supporting evidence, not deficit score)")
         chart_bar(by_type, "type", "clipped_area_m2",
