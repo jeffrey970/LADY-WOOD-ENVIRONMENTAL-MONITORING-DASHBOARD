@@ -9,9 +9,9 @@ from shapely.geometry import shape
 from streamlit_folium import st_folium
 
 
-# --------------------------------------------------
+# =========================================================
 # 1. PAGE SETTINGS
-# --------------------------------------------------
+# =========================================================
 
 st.set_page_config(
     page_title="Ladywood Environmental Dashboard",
@@ -19,62 +19,93 @@ st.set_page_config(
 )
 
 st.title("Ladywood Environmental Monitoring Dashboard")
-st.write(
-    "Environmental factors for Ladywood, Birmingham, "
-    "using Birmingham City Council's CRVA data."
-)
+st.caption("Ladywood, Birmingham, United Kingdom")
 
 st.info(
-    "The council's CRVA uses a 100 m grid and factor-specific "
-    "standardisation. Individual source layers below are displayed "
-    "separately; they are not presented as recalculated official "
-    "CRVA scores."
+    "This dashboard uses Birmingham City Council's CRVA service. "
+    "Source layers are shown separately. Only the council's published "
+    "CRVA layer is labelled as the official combined CRVA score."
 )
 
 
-# --------------------------------------------------
-# 2. OFFICIAL DATA SOURCES
-# --------------------------------------------------
+# =========================================================
+# 2. OFFICIAL COUNCIL SERVICES
+# =========================================================
 
 CRVA_URL = (
     "https://maps.birmingham.gov.uk/server/rest/services/"
     "CRVA/CRVA_2025/MapServer"
 )
 
-BROWNFIELD_URL = (
+LANDUSE_URL = (
     "https://maps.birmingham.gov.uk/server/rest/services/"
     "mybrummap/mybrummap_LandUse/MapServer"
 )
 
+# The official CRVA layer IDs.
+# Some layers are feature layers; others may be image/raster layers.
 
-# Council CRVA source layers
-LAYERS = {
-    "Official CRVA score by LSOA": (CRVA_URL, 15),
-    "Fluvial flooding": (CRVA_URL, 109),
-    "Surface flooding": (CRVA_URL, 1546),
-    "Surface temperature (1981–2000)": (CRVA_URL, 18),
-    "Local climate zones": (CRVA_URL, 4),
-    "Greenspace": (CRVA_URL, 1549),
-    "Woodland / tree cover context": (CRVA_URL, 1552),
-    "Tree canopy layer": (CRVA_URL, 3),
+FACTORS = {
+    "Official CRVA score by LSOA": {
+        "url": CRVA_URL,
+        "id": 15,
+        "type": "features"
+    },
+    "3. Fluvial flooding": {
+        "url": CRVA_URL,
+        "id": 109,
+        "type": "features"
+    },
+    "4. Surface flooding": {
+        "url": CRVA_URL,
+        "id": 1546,
+        "type": "features"
+    },
+    "5. Surface temperature (1981–2000)": {
+        "url": CRVA_URL,
+        "id": 18,
+        "type": "image"
+    },
+    "6. Local climate zones": {
+        "url": CRVA_URL,
+        "id": 4,
+        "type": "features"
+    },
+    "7–8. Greenspace source layer": {
+        "url": CRVA_URL,
+        "id": 1549,
+        "type": "features"
+    },
+    "9. Tree canopy source layer": {
+        "url": CRVA_URL,
+        "id": 3,
+        "type": "image"
+    },
+    "Woodland source layer": {
+        "url": CRVA_URL,
+        "id": 1552,
+        "type": "features"
+    },
+    "Brownfield register (additional indicator)": {
+        "url": LANDUSE_URL,
+        "id": 38,
+        "type": "features"
+    }
 }
 
 
-# --------------------------------------------------
-# 3. DOWNLOAD FEATURES FROM ARCGIS
-# --------------------------------------------------
+# =========================================================
+# 3. DOWNLOAD A FEATURE LAYER
+# =========================================================
 
 @st.cache_data(ttl=3600)
-def download_layer(service_url, layer_id):
-    """
-    Download a feature layer from the council's ArcGIS service.
-    Returns a GeoDataFrame or an empty GeoDataFrame if unavailable.
-    """
+def download_features(service_url, layer_id, where="1=1"):
+    """Download features from an ArcGIS layer."""
 
     query_url = f"{service_url}/{layer_id}/query"
 
-    parameters = {
-        "where": "1=1",
+    params = {
+        "where": where,
         "outFields": "*",
         "returnGeometry": "true",
         "outSR": "4326",
@@ -82,131 +113,152 @@ def download_layer(service_url, layer_id):
         "resultRecordCount": 2000
     }
 
-    try:
-        response = requests.get(
-            query_url,
-            params=parameters,
-            timeout=60
-        )
-        response.raise_for_status()
-        data = response.json()
+    response = requests.get(
+        query_url,
+        params=params,
+        timeout=60
+    )
+    response.raise_for_status()
 
-        if "features" not in data or not data["features"]:
-            return gpd.GeoDataFrame(
-                geometry=[],
-                crs="EPSG:4326"
-            )
+    data = response.json()
 
-        records = []
+    if "error" in data:
+        raise ValueError(data["error"].get("message", "ArcGIS query failed"))
 
-        for feature in data["features"]:
-            properties = feature.get("properties", {})
-            geometry_data = feature.get("geometry")
+    features = data.get("features", [])
 
-            if geometry_data:
-                properties["geometry"] = shape(geometry_data)
-                records.append(properties)
+    records = []
 
-        if not records:
-            return gpd.GeoDataFrame(
-                geometry=[],
-                crs="EPSG:4326"
-            )
+    for feature in features:
+        geometry_data = feature.get("geometry")
 
+        if geometry_data:
+            record = feature.get("properties", {}).copy()
+            record["geometry"] = shape(geometry_data)
+            records.append(record)
+
+    if not records:
         return gpd.GeoDataFrame(
-            records,
-            geometry="geometry",
+            geometry=[],
             crs="EPSG:4326"
         )
 
-    except Exception as error:
-        st.warning(
-            f"Could not download layer {layer_id}: {error}"
+    return gpd.GeoDataFrame(
+        records,
+        geometry="geometry",
+        crs="EPSG:4326"
+    )
+
+
+# =========================================================
+# 4. LOAD THE LADYWOOD WARD BOUNDARY
+# =========================================================
+
+@st.cache_data(ttl=3600)
+def get_ladywood_boundary():
+    """
+    The CRVA By Ward layer contains the ward name and geometry.
+    Query Ladywood directly instead of guessing a boundary.
+    """
+
+    ward_data = download_features(
+        CRVA_URL,
+        12,
+        "WARDNME = 'Ladywood'"
+    )
+
+    if ward_data.empty:
+        return None
+
+    return ward_data[["geometry"]].dissolve()
+
+
+try:
+    boundary = get_ladywood_boundary()
+
+except Exception as error:
+    st.error(
+        "The official Ladywood boundary could not be downloaded. "
+        "Check the app logs and internet connection."
+    )
+    st.code(str(error))
+    st.stop()
+
+if boundary is None or boundary.empty:
+    st.error(
+        "The council service returned no Ladywood boundary. "
+        "The dashboard cannot safely filter data to Ladywood."
+    )
+    st.stop()
+
+
+# =========================================================
+# 5. CLIP FEATURE DATA TO LADYWOOD
+# =========================================================
+
+def clip_to_ladywood(data):
+    """Keep features intersecting the Ladywood ward boundary."""
+
+    if data is None or data.empty:
+        return gpd.GeoDataFrame(
+            geometry=[],
+            crs="EPSG:4326"
         )
+
+    try:
+        ward = boundary.to_crs(data.crs)
+        return gpd.clip(data, ward)
+
+    except Exception as error:
+        st.warning(f"Could not clip this layer: {error}")
+
         return gpd.GeoDataFrame(
             geometry=[],
             crs="EPSG:4326"
         )
 
 
-# --------------------------------------------------
-# 4. GET LADYWOOD BOUNDARY
-# --------------------------------------------------
-
-@st.cache_data(ttl=3600)
-def get_ladywood_boundary():
-    """Download the official Ladywood ward boundary."""
-
-    wards_url = (
-        "https://maps.birmingham.gov.uk/server/rest/services/"
-        "Internet_Boundaries/MapServer/0/query"
-    )
-
-    params = {
-        "where": "WARDNME = 'Ladywood'",
-        "outFields": "*",
-        "returnGeometry": "true",
-        "outSR": "4326",
-        "f": "geojson"
-    }
-
-    try:
-        response = requests.get(
-            wards_url,
-            params=params,
-            timeout=60
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if "features" not in data or not data["features"]:
-            st.error(
-                "Ladywood was not returned by the official ward query."
-            )
-            return None
-
-        records = []
-
-        for feature in data["features"]:
-            geometry_data = feature.get("geometry")
-
-            if geometry_data:
-                records.append({
-                    "geometry": shape(geometry_data)
-                })
-
-        if not records:
-            return None
-
-        return gpd.GeoDataFrame(
-            records,
-            geometry="geometry",
-            crs="EPSG:4326"
-        ).dissolve()
-
-    except Exception as error:
-        st.error(f"Boundary download failed: {error}")
-        return None
-
-# --------------------------------------------------
-# 6. SELECT A FACTOR
-# --------------------------------------------------
+# =========================================================
+# 6. FACTOR SELECTION
+# =========================================================
 
 factor_name = st.selectbox(
     "Choose an environmental factor",
-    list(LAYERS.keys())
+    list(FACTORS.keys())
 )
 
-service_url, layer_id = LAYERS[factor_name]
+factor = FACTORS[factor_name]
 
-with st.spinner(f"Loading {factor_name}..."):
-    factor_data = download_layer(service_url, layer_id)
-    factor_data = clip_to_ladywood(factor_data)
+st.subheader(factor_name)
+
+st.write(
+    f"Council service layer ID: {factor['id']}"
+)
+
+if factor_name == "5. Surface temperature (1981–2000)":
+    st.warning(
+        "This is historical temperature data from 1981–2000, "
+        "not a current temperature measurement."
+    )
+
+if factor_name == "9. Tree canopy source layer":
+    st.info(
+        "The council describes this as a vegetation-model hillshade "
+        "showing tree canopy cover. It may need to be displayed as a "
+        "map image rather than downloaded as individual features."
+    )
+
+if factor_name == "7–8. Greenspace source layer":
+    st.warning(
+        "This is the source greenspace layer. It is not itself the "
+        "official open-greenspace deficit score or other-greenspace "
+        "deficit score. Those require the council's calculation method."
+    )
 
 
-# --------------------------------------------------
-# 7. DRAW THE MAP
-# --------------------------------------------------
+# =========================================================
+# 7. BUILD THE MAP
+# =========================================================
 
 map_centre = [52.48, -1.92]
 
@@ -216,69 +268,101 @@ environment_map = folium.Map(
     tiles="OpenStreetMap"
 )
 
-# Draw the Ladywood boundary.
 folium.GeoJson(
     boundary.to_crs("EPSG:4326").to_json(),
-    name="Ladywood boundary",
+    name="Ladywood ward boundary",
     style_function=lambda feature: {
         "color": "black",
-        "weight": 2,
+        "weight": 3,
         "fillOpacity": 0
-    }
+    },
+    tooltip="Ladywood ward"
 ).add_to(environment_map)
 
 
-if not factor_data.empty:
+# =========================================================
+# 8. ADD THE SELECTED FEATURE LAYER
+# =========================================================
 
-    # Create a readable popup from available attribute fields.
-    possible_fields = [
-        column for column in factor_data.columns
-        if column != "geometry"
-    ]
+factor_data = gpd.GeoDataFrame(
+    geometry=[],
+    crs="EPSG:4326"
+)
 
-    def make_popup(properties):
-        lines = []
+if factor["type"] == "features":
 
-        for field in possible_fields[:8]:
-            value = properties.get(field)
+    try:
+        with st.spinner(f"Loading {factor_name}..."):
+            all_features = download_features(
+                factor["url"],
+                factor["id"]
+            )
 
-            if value is not None:
-                lines.append(f"{field}: {value}")
+            factor_data = clip_to_ladywood(all_features)
 
-        return "<br>".join(lines) or factor_name
+        if not factor_data.empty:
 
-    folium.GeoJson(
-        factor_data.to_crs("EPSG:4326").to_json(),
-        name=factor_name,
-        style_function=lambda feature: {
-            "color": "#6b3f1d",
-            "weight": 1,
-            "fillColor": "#d98c42",
-            "fillOpacity": 0.45
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=possible_fields[:1],
-            aliases=possible_fields[:1],
-            sticky=True
-        ) if possible_fields else None,
-        popup=folium.GeoJsonPopup(
-            fields=possible_fields[:min(8, len(possible_fields))]
-        ) if possible_fields else None
-    ).add_to(environment_map)
+            fields = [
+                column for column in factor_data.columns
+                if column != "geometry"
+            ]
 
-    st.success(
-        f"Loaded {len(factor_data)} feature(s) for this layer."
-    )
+            # Use available fields for map popups.
+            popup_fields = fields[:8]
+
+            folium.GeoJson(
+                factor_data.to_crs("EPSG:4326").to_json(),
+                name=factor_name,
+                style_function=lambda feature: {
+                    "color": "#754c24",
+                    "weight": 1,
+                    "fillColor": "#e6a04b",
+                    "fillOpacity": 0.45
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=fields[:1],
+                    aliases=fields[:1]
+                ) if fields else None,
+                popup=folium.GeoJsonPopup(
+                    fields=popup_fields
+                ) if popup_fields else None
+            ).add_to(environment_map)
+
+            st.success(
+                f"Retrieved {len(factor_data)} feature(s) "
+                "intersecting Ladywood."
+            )
+
+        else:
+            st.warning(
+                "The query returned no features in Ladywood. "
+                "This does not mean the environmental risk is zero."
+            )
+
+    except Exception as error:
+        st.error(
+            "This feature layer could not be retrieved. "
+            "The rest of the dashboard remains available."
+        )
+        st.code(str(error))
 
 else:
+    # Raster/image layers are not assumed to be downloadable as polygons.
+    # Add a direct link to the exact council layer.
+    layer_page = f"{factor['url']}/{factor['id']}"
+
     st.warning(
-        "No features were returned for this layer. "
-        "This does not mean the environmental risk is zero."
+        "This is treated as an image layer. The script will not invent "
+        "polygon data or numeric values for it."
     )
 
-folium.LayerControl().add_to(environment_map)
+    st.link_button(
+        "Open this official council layer",
+        layer_page
+    )
 
-st.subheader(f"Map: {factor_name}")
+
+folium.LayerControl(collapsed=False).add_to(environment_map)
 
 st_folium(
     environment_map,
@@ -287,111 +371,144 @@ st_folium(
 )
 
 
-# --------------------------------------------------
-# 8. SHOW AVAILABLE DATA
-# --------------------------------------------------
+# =========================================================
+# 9. SHOW DATA TABLE
+# =========================================================
 
-st.subheader("Data table")
+st.subheader("Retrieved source data")
 
 if not factor_data.empty:
+
     table = factor_data.drop(
         columns="geometry",
         errors="ignore"
     )
 
-    st.dataframe(table, use_container_width=True)
+    st.dataframe(
+        table,
+        use_container_width=True
+    )
 
     st.download_button(
-        "Download this factor as CSV",
+        label="Download source data as CSV",
         data=table.to_csv(index=False),
-        file_name="ladywood_factor_data.csv",
+        file_name="ladywood_environmental_factor.csv",
         mime="text/csv"
     )
 
 else:
-    st.write("No data table is available for this selection.")
+    st.write(
+        "No feature table is available for this selection. "
+        "Image layers are linked to the official council service."
+    )
 
 
-# --------------------------------------------------
-# 9. SIMPLE CHART OF NUMERIC ATTRIBUTES
-# --------------------------------------------------
+# =========================================================
+# 10. SIMPLE CHART
+# =========================================================
 
-st.subheader("Explore numeric attributes")
+st.subheader("Explore available numeric data")
 
 if not factor_data.empty:
+
     table = factor_data.drop(
         columns="geometry",
         errors="ignore"
     )
 
-    numeric_columns = table.select_dtypes(
+    numeric_fields = table.select_dtypes(
         include="number"
     ).columns.tolist()
 
-    if numeric_columns:
-        selected_column = st.selectbox(
-            "Choose a numeric field to chart",
-            numeric_columns
+    if numeric_fields:
+
+        chosen_field = st.selectbox(
+            "Choose a numeric field",
+            numeric_fields
         )
 
-        chart_data = pd.to_numeric(
-            table[selected_column],
+        values = pd.to_numeric(
+            table[chosen_field],
             errors="coerce"
         ).dropna()
 
-        if not chart_data.empty:
+        if not values.empty:
+
             fig, ax = plt.subplots()
 
-            ax.hist(chart_data, bins=15)
+            ax.hist(values, bins=15)
+
             ax.set_title(
-                f"{selected_column} — {factor_name}"
+                f"{chosen_field}: {factor_name}"
             )
-            ax.set_xlabel(selected_column)
+            ax.set_xlabel(chosen_field)
             ax.set_ylabel("Number of features")
 
             st.pyplot(fig)
+            plt.close(fig)
 
             st.write(
-                "This chart shows the distribution of values "
-                "returned by the source layer. It is not, by itself, "
-                "a standardised CRVA risk score."
+                "This histogram shows the distribution of the selected "
+                "source field. It is not automatically a CRVA risk score."
             )
+
         else:
-            st.write("No numeric values are available in this field.")
+            st.info("This field has no usable numeric values.")
+
     else:
-        st.write(
-            "This layer has no numeric attributes suitable "
-            "for this simple chart."
+        st.info(
+            "This layer has no numeric fields suitable for a histogram."
         )
 
 
-# --------------------------------------------------
-# 10. METHODOLOGY NOTES
-# --------------------------------------------------
+# =========================================================
+# 11. OFFICIAL CRVA REFERENCE
+# =========================================================
 
-with st.expander("Methodology and limitations"):
+with st.expander("CRVA methodology and data limitations"):
+
     st.markdown("""
-    **Official reference:** Birmingham City Council's Climate Risk
-    and Vulnerability Assessment (CRVA).
+    **Official method**
 
-    - The council's method uses a 100 m grid.
-    - Each factor is standardised to a score between 0 and 1.
-    - Factor-specific transformations are used; raw values should not
-      be treated as standardised scores.
-    - The full official CRVA combines 11 factors with equal weighting.
-    - This dashboard focuses on factors 3–9 and shows the source layers
-      separately for investigation.
-    - The published temperature layer represents 1981–2000 and is not
-      current temperature data.
-    - The greenspace, woodland and tree-canopy layers are source layers;
-      they do not necessarily represent the council's calculated deficit
-      scores directly.
-    - Missing data are not treated as zero.
-    - Brownfield land is an additional project indicator, not one of the
-      11 official CRVA factors.
+    Birmingham's CRVA standardises environmental and social factors
+    onto a common 100 m grid. Each factor receives a score between
+    0 and 1, where higher scores indicate greater risk or vulnerability.
+    The official combined assessment sums the factor scores using
+    equal weighting.
+
+    **What this dashboard currently does**
+
+    - Uses the council's official ward boundary to define Ladywood.
+    - Displays available feature layers separately.
+    - Provides the published CRVA-by-LSOA layer as a reference.
+    - Does not turn missing data into zero.
+    - Does not label raw source values as official standardised scores.
+    - Keeps brownfield land as an additional project indicator.
+
+    **Important limitations**
+
+    - The full official CRVA uses 11 factors. This dashboard focuses on
+      factors 3–9 and does not recalculate the complete official score.
+    - The greenspace source layer alone does not separate both deficit
+      factors.
+    - Temperature data are from 1981–2000.
+    - Tree-canopy and temperature layers may require image-based GIS
+      methods rather than ordinary feature queries.
     """)
-    
+
     st.markdown(
-        "[Open Birmingham City Council's CRVA methodology]"
+        "[Open the council's CRVA map]"
         "(https://maps.birmingham.gov.uk/webapps/crva/crva.html)"
+    )
+
+    st.markdown(
+        "[Open the official CRVA data catalogue]"
+        "(https://maps.birmingham.gov.uk/server/rest/services/"
+        "CRVA/CRVA_2025/MapServer)"
+    )
+
+    st.markdown(
+        "[Open the CRVA methodology PDF]"
+        "(https://research.birmingham.ac.uk/files/253369474/"
+        "CRVA_methodology_guidancedoc_v1.1.pdf)"
     )
