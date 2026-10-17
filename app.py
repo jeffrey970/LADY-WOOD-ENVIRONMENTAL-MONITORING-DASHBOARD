@@ -28,21 +28,65 @@ def arcgis_json(url, params):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_ladywood():
-    # CRVA ward layer has WARDNME and is queried without resultRecordCount
-    data = arcgis_json(WARD_URL, {
-        "where": "WARDNME = 'Ladywood'",
-        "outFields": "WARDNME,MEAN,MEDIAN,MIN,MAX,MINIMUM_RISK,AVERAGE_RISK,MAXIMUM_RISK",
-        "returnGeometry": "true", "outSR": "27700", "f": "geojson"
+    """ Use the dedicated official ward-boundary layer for geometry. Then attach the council's combined CRVA ward summary if that layer returns it. Geometry and CRVA statistics are queried separately so a CRVA summary query cannot prevent the map and factor charts from loading. """
+    boundary_url = (
+        "https://maps.birmingham.gov.uk/server/rest/services/"
+        "Internet_Boundaries/MapServer/0/query"
+    )
+    boundary_data = arcgis_json(boundary_url, {
+        "where": "1=1",
+        "outFields": "WARDNME,AREASQM,AREAHECTARES",
+        "returnGeometry": "true",
+        "outSR": "27700",
+        "f": "geojson",
     })
-    features = data.get("features", [])
-    if not features:
-        raise RuntimeError("CRVA ward query returned no Ladywood feature.")
-    records = []
-    for f in features:
-        if f.get("geometry"):
-            records.append({**(f.get("properties") or {}),
-                            "geometry": shape(f["geometry"])})
-    return gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:27700")
+    boundary_features = boundary_data.get("features", [])
+    ladywood_feature = None
+    for feature in boundary_features:
+        props = feature.get("properties") or {}
+        name = str(props.get("WARDNME", "")).strip()
+        if name.casefold() == "ladywood" and feature.get("geometry"):
+            ladywood_feature = feature
+            break
+
+    if ladywood_feature is None:
+        names = [
+            str((f.get("properties") or {}).get("WARDNME", "")).strip()
+            for f in boundary_features
+        ]
+        raise RuntimeError(
+            "Ward boundary service did not return a Ladywood feature. "
+            f"Returned {len(boundary_features)} features; sample ward names: {names[:12]}"
+        )
+
+    properties = ladywood_feature.get("properties") or {}
+    properties = dict(properties)
+    properties["geometry"] = shape(ladywood_feature["geometry"])
+    boundary_gdf = gpd.GeoDataFrame(
+        [properties], geometry="geometry", crs="EPSG:27700"
+    )
+
+    # Optional published combined CRVA statistics. Failure here does not stop charts.
+    try:
+        crva_data = arcgis_json(f"{CRVA}/12/query", {
+            "where": "1=1",
+            "outFields": "WARDNME,MEAN,MEDIAN,MIN,MAX,MINIMUM_RISK,AVERAGE_RISK,MAXIMUM_RISK",
+            "returnGeometry": "false",
+            "f": "json",
+        })
+        for feature in crva_data.get("features", []):
+            attrs = feature.get("attributes") or {}
+            if str(attrs.get("WARDNME", "")).strip().casefold() == "ladywood":
+                for field in ["MEAN", "MEDIAN", "MIN", "MAX",
+                              "MINIMUM_RISK", "AVERAGE_RISK", "MAXIMUM_RISK"]:
+                    if field in attrs:
+                        boundary_gdf.loc[0, field] = attrs[field]
+                break
+    except Exception:
+        pass
+
+    return boundary_gdf
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_vector_layer(layer_id, boundary_geojson):
@@ -123,7 +167,7 @@ with st.sidebar:
 
 try:
     ward = load_ladywood()
-    boundary = ward.geometry.union_all()
+    boundary = ward.geometry.unary_union
 except Exception as e:
     st.error("Could not retrieve Ladywood from the official CRVA ward layer.")
     st.code(str(e))
