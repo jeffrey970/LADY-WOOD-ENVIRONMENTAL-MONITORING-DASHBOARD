@@ -135,74 +135,58 @@ def download_layer(service_url, layer_id):
 
 @st.cache_data(ttl=3600)
 def get_ladywood_boundary():
-    """
-    Find the official Ladywood ward polygon.
-    """
+    """Download the official Ladywood ward boundary."""
 
-    wards = download_layer(CRVA_URL, 14)
-
-    if wards.empty:
-        return None
-
-    # Find the ward-name field without assuming its capitalisation.
-    name_fields = [
-        column for column in wards.columns
-        if column.upper() in ["WARDNME", "WARD_NAME", "NAME"]
-    ]
-
-    if not name_fields:
-        return None
-
-    name_field = name_fields[0]
-
-    ladywood = wards[
-        wards[name_field].astype(str).str.strip().str.lower()
-        == "ladywood"
-    ]
-
-    if ladywood.empty:
-        return None
-
-    return ladywood[["geometry"]].dissolve()
-
-
-boundary = get_ladywood_boundary()
-
-if boundary is None:
-    st.error(
-        "The Ladywood ward boundary could not be loaded. "
-        "Check the council service connection and ward-name field."
+    wards_url = (
+        "https://maps.birmingham.gov.uk/server/rest/services/"
+        "Internet_Boundaries/MapServer/0/query"
     )
-    st.stop()
 
-
-# --------------------------------------------------
-# 5. CLIP DATA TO LADYWOOD
-# --------------------------------------------------
-
-def clip_to_ladywood(data):
-    """
-    Keep features that intersect Ladywood.
-    Uses the official ward polygon as the study boundary.
-    """
-
-    if data.empty:
-        return data
+    params = {
+        "where": "WARDNME = 'Ladywood'",
+        "outFields": "*",
+        "returnGeometry": "true",
+        "outSR": "4326",
+        "f": "geojson"
+    }
 
     try:
-        boundary_same_crs = boundary.to_crs(data.crs)
+        response = requests.get(
+            wards_url,
+            params=params,
+            timeout=60
+        )
+        response.raise_for_status()
+        data = response.json()
 
-        clipped = gpd.clip(data, boundary_same_crs)
+        if "features" not in data or not data["features"]:
+            st.error(
+                "Ladywood was not returned by the official ward query."
+            )
+            return None
 
-        return clipped[~clipped.geometry.is_empty]
+        records = []
+
+        for feature in data["features"]:
+            geometry_data = feature.get("geometry")
+
+            if geometry_data:
+                records.append({
+                    "geometry": shape(geometry_data)
+                })
+
+        if not records:
+            return None
+
+        return gpd.GeoDataFrame(
+            records,
+            geometry="geometry",
+            crs="EPSG:4326"
+        ).dissolve()
 
     except Exception as error:
-        st.warning(f"Could not clip layer to Ladywood: {error}")
-        return gpd.GeoDataFrame(
-            geometry=[],
-            crs="EPSG:4326"
-        )
-
+        st.error(f"Boundary download failed: {error}")
+        return None
 
 # --------------------------------------------------
 # 6. SELECT A FACTOR
