@@ -368,6 +368,10 @@ if priority_df.empty:
 else:
     st.dataframe(priority_df[["LSOA21CD", "LSOA21NM", "Environmental_Index", "Dominant_Environmental_Driver"]], use_container_width=True, hide_index=True)
 
+st.subheader("Recommended Engineering Solutions")
+st.markdown("""
+
+""")
 st.subheader("Environmental Risk by Ladywood Area")
 st.caption("Higher values indicate higher combined project assessment scores")
 st.bar_chart(risk_df.set_index("LSOA21NM")[["Environmental_Index"]])
