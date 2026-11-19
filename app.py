@@ -370,7 +370,9 @@ else:
 
 st.subheader("Recommended Engineering Solutions")
 st.markdown("""
-
+1)
+2)
+3)
 """)
 st.subheader("Environmental Risk by Ladywood Area")
 st.caption("Higher values indicate higher combined project assessment scores")
